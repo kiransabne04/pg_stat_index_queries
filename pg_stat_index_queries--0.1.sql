@@ -1,0 +1,86 @@
+/* pg_stat_index_queries--0.1.sql */
+
+\echo Use "CREATE EXTENSION pg_stat_index_queries" to load this file. \quit
+
+CREATE FUNCTION pg_stat_index_queries(
+    OUT dbid oid,
+    OUT indexrelid oid,
+    OUT queryid bigint,
+    OUT toplevel bool,
+    OUT calls_executed bigint,
+    OUT calls_planned bigint,
+    OUT first_seen timestamptz,
+    OUT last_seen timestamptz
+)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'pg_stat_index_queries'
+LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
+
+CREATE VIEW pg_stat_index_queries AS
+    SELECT * FROM pg_stat_index_queries();
+
+CREATE FUNCTION pg_stat_index_queries_reset()
+RETURNS void
+AS 'MODULE_PATHNAME', 'pg_stat_index_queries_reset'
+LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
+
+CREATE FUNCTION pg_stat_index_queries_info(
+    OUT entries bigint,
+    OUT dealloc bigint,
+    OUT stats_reset timestamptz
+)
+RETURNS record
+AS 'MODULE_PATHNAME', 'pg_stat_index_queries_info'
+LANGUAGE C STRICT VOLATILE PARALLEL SAFE;
+
+CREATE VIEW pg_stat_index_queries_info AS
+    SELECT * FROM pg_stat_index_queries_info();
+
+-- Indexes in the current database and the queries that used them.
+-- Join to pg_stat_statements on (dbid, queryid) for query text.
+CREATE VIEW pg_index_dependents AS
+    SELECT n.nspname AS schemaname,
+           t.relname AS tablename,
+           i.relname AS indexname,
+           s.indexrelid,
+           s.queryid,
+           s.toplevel,
+           s.calls_executed,
+           s.calls_planned,
+           s.first_seen,
+           s.last_seen
+      FROM pg_stat_index_queries() s
+      JOIN pg_class i ON i.oid = s.indexrelid
+      JOIN pg_index x ON x.indexrelid = s.indexrelid
+      JOIN pg_class t ON t.oid = x.indrelid
+      JOIN pg_namespace n ON n.oid = i.relnamespace
+     WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database());
+
+-- User indexes with no recorded executed use since the last reset.
+-- Excludes primary keys, unique indexes and constraint-backed indexes.
+-- ALWAYS check tracked_since before acting on this list.
+CREATE VIEW pg_index_no_dependents AS
+    SELECT n.nspname AS schemaname,
+           t.relname AS tablename,
+           i.relname AS indexname,
+           x.indexrelid,
+           pg_relation_size(x.indexrelid) AS index_bytes,
+           (SELECT stats_reset FROM pg_stat_index_queries_info()) AS tracked_since
+      FROM pg_index x
+      JOIN pg_class i ON i.oid = x.indexrelid
+      JOIN pg_class t ON t.oid = x.indrelid
+      JOIN pg_namespace n ON n.oid = i.relnamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+       AND n.nspname NOT LIKE 'pg_toast%'
+       AND NOT x.indisprimary
+       AND NOT x.indisunique
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = x.indexrelid)
+       AND NOT EXISTS (
+            SELECT 1 FROM pg_stat_index_queries() s
+             WHERE s.indexrelid = x.indexrelid
+               AND s.calls_executed > 0
+               AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database()));
+
+REVOKE ALL ON FUNCTION pg_stat_index_queries_reset() FROM PUBLIC;
+GRANT SELECT ON pg_stat_index_queries, pg_stat_index_queries_info,
+                pg_index_dependents, pg_index_no_dependents TO PUBLIC;

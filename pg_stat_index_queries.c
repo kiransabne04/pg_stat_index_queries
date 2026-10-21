@@ -28,6 +28,8 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
 #include "nodes/queryjumble.h"
+#include "pgstat.h"
+#include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
@@ -38,11 +40,18 @@
 #include "utils/hsearch.h"
 #include "utils/timestamp.h"
 
+#include <unistd.h>
+
 PG_MODULE_MAGIC;
 
 #define PGSIQ_TRANCHE_NAME		"pg_stat_index_queries"
 #define PGSIQ_DEALLOC_PERCENT	5
 #define PGSIQ_MAX_INDEXES_PER_STMT	64
+
+/* Persistence across clean restarts (same approach as pg_stat_statements). */
+#define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
+#define PGSIQ_FILE_HEADER	0x51495301	/* "SIQ" + format version 1 */
+#define PGSIQ_PG_MAJOR		(PG_VERSION_NUM / 100)
 
 /* ---------- shared structures ---------- */
 
@@ -106,6 +115,7 @@ static const struct config_enum_entry track_options[] =
 static int	pgsiq_max = 10000;
 static int	pgsiq_track = PGSIQ_TRACK_TOP;
 static bool pgsiq_track_catalog = false;
+static bool pgsiq_save = true;
 
 /* ---------- state ---------- */
 
@@ -150,6 +160,8 @@ static Size pgsiq_memsize(void);
 static bool pgsiq_walker(PlanState *planstate, void *context);
 static void pgsiq_store(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel);
 static void entry_dealloc(void);
+static void pgsiq_shmem_shutdown(int code, Datum arg);
+static void pgsiq_load_file(void);
 
 PG_FUNCTION_INFO_V1(pg_stat_index_queries);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_reset);
@@ -194,6 +206,15 @@ _PG_init(void)
 							 &pgsiq_track_catalog,
 							 false,
 							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("pg_stat_index_queries.save",
+							 "Save counters across server restarts.",
+							 NULL,
+							 &pgsiq_save,
+							 true,
+							 PGC_SIGHUP,
 							 0,
 							 NULL, NULL, NULL);
 
@@ -268,6 +289,171 @@ pgsiq_shmem_startup(void)
 							   HASH_ELEM | HASH_BLOBS);
 
 	LWLockRelease(AddinShmemInitLock);
+
+	/* The postmaster saves the counters at clean shutdown. */
+	if (!IsUnderPostmaster)
+		on_shmem_exit(pgsiq_shmem_shutdown, (Datum) 0);
+
+	/* Load saved counters only when shared memory is freshly created. */
+	if (!found)
+		pgsiq_load_file();
+}
+
+/* ---------- persistence ---------- */
+
+/*
+ * File layout: header, PG major, entry count, dealloc, stats_reset, then
+ * entry_count records of (key, calls_executed, calls_planned, first_seen,
+ * last_seen). Any mismatch or short read discards the whole file.
+ */
+static void
+pgsiq_load_file(void)
+{
+	FILE	   *file;
+	uint32		header;
+	int32		pgmajor;
+	int64		count;
+	int64		dealloc;
+	TimestampTz stats_reset;
+	int64		i;
+
+	file = AllocateFile(PGSIQ_DUMP_FILE, PG_BINARY_R);
+	if (file == NULL)
+	{
+		if (errno != ENOENT)
+			ereport(LOG,
+					(errcode_for_file_access(),
+					 errmsg("could not read file \"%s\": %m", PGSIQ_DUMP_FILE)));
+		return;
+	}
+
+	if (fread(&header, sizeof(uint32), 1, file) != 1 ||
+		fread(&pgmajor, sizeof(int32), 1, file) != 1 ||
+		fread(&count, sizeof(int64), 1, file) != 1 ||
+		fread(&dealloc, sizeof(int64), 1, file) != 1 ||
+		fread(&stats_reset, sizeof(TimestampTz), 1, file) != 1)
+		goto bad_file;
+
+	if (header != PGSIQ_FILE_HEADER || pgmajor != PGSIQ_PG_MAJOR || count < 0)
+		goto bad_file;
+
+	for (i = 0; i < count; i++)
+	{
+		pgsiqEntry	temp;
+		pgsiqEntry *entry;
+		bool		found;
+
+		if (fread(&temp.key, sizeof(pgsiqHashKey), 1, file) != 1 ||
+			fread(&temp.calls_executed, sizeof(int64), 1, file) != 1 ||
+			fread(&temp.calls_planned, sizeof(int64), 1, file) != 1 ||
+			fread(&temp.first_seen, sizeof(TimestampTz), 1, file) != 1 ||
+			fread(&temp.last_seen, sizeof(TimestampTz), 1, file) != 1)
+			goto bad_file;
+
+		/* Never exceed the configured size; drop the remainder. */
+		if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
+			break;
+
+		entry = (pgsiqEntry *) hash_search(pgsiq_hash, &temp.key,
+										   HASH_ENTER, &found);
+		if (!found)
+			SpinLockInit(&entry->mutex);
+		entry->calls_executed = temp.calls_executed;
+		entry->calls_planned = temp.calls_planned;
+		entry->first_seen = temp.first_seen;
+		entry->last_seen = temp.last_seen;
+	}
+
+	pgsiq->dealloc = dealloc;
+	pgsiq->stats_reset = stats_reset;
+
+	FreeFile(file);
+
+	/* Remove the file so a later crash doesn't reload stale counters. */
+	unlink(PGSIQ_DUMP_FILE);
+	return;
+
+bad_file:
+	ereport(LOG,
+			(errmsg("ignoring invalid pg_stat_index_queries file \"%s\"",
+					PGSIQ_DUMP_FILE)));
+	FreeFile(file);
+	unlink(PGSIQ_DUMP_FILE);
+
+	/* Start clean: drop anything partially loaded. */
+	{
+		HASH_SEQ_STATUS hash_seq;
+		pgsiqEntry *entry;
+
+		hash_seq_init(&hash_seq, pgsiq_hash);
+		while ((entry = hash_seq_search(&hash_seq)) != NULL)
+			hash_search(pgsiq_hash, &entry->key, HASH_REMOVE, NULL);
+	}
+}
+
+static void
+pgsiq_shmem_shutdown(int code, Datum arg)
+{
+	FILE	   *file;
+	HASH_SEQ_STATUS hash_seq;
+	pgsiqEntry *entry;
+	uint32		header = PGSIQ_FILE_HEADER;
+	int32		pgmajor = PGSIQ_PG_MAJOR;
+	int64		count;
+
+	/* Don't save after a crash, or if shared memory was never set up. */
+	if (code != 0 || !pgsiq || !pgsiq_hash)
+		return;
+
+	if (!pgsiq_save)
+	{
+		unlink(PGSIQ_DUMP_FILE);
+		return;
+	}
+
+	file = AllocateFile(PGSIQ_DUMP_FILE ".tmp", PG_BINARY_W);
+	if (file == NULL)
+		goto error;
+
+	count = hash_get_num_entries(pgsiq_hash);
+
+	if (fwrite(&header, sizeof(uint32), 1, file) != 1 ||
+		fwrite(&pgmajor, sizeof(int32), 1, file) != 1 ||
+		fwrite(&count, sizeof(int64), 1, file) != 1 ||
+		fwrite(&pgsiq->dealloc, sizeof(int64), 1, file) != 1 ||
+		fwrite(&pgsiq->stats_reset, sizeof(TimestampTz), 1, file) != 1)
+		goto error;
+
+	hash_seq_init(&hash_seq, pgsiq_hash);
+	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	{
+		if (fwrite(&entry->key, sizeof(pgsiqHashKey), 1, file) != 1 ||
+			fwrite(&entry->calls_executed, sizeof(int64), 1, file) != 1 ||
+			fwrite(&entry->calls_planned, sizeof(int64), 1, file) != 1 ||
+			fwrite(&entry->first_seen, sizeof(TimestampTz), 1, file) != 1 ||
+			fwrite(&entry->last_seen, sizeof(TimestampTz), 1, file) != 1)
+		{
+			hash_seq_term(&hash_seq);
+			goto error;
+		}
+	}
+
+	if (FreeFile(file))
+	{
+		file = NULL;
+		goto error;
+	}
+
+	(void) durable_rename(PGSIQ_DUMP_FILE ".tmp", PGSIQ_DUMP_FILE, LOG);
+	return;
+
+error:
+	ereport(LOG,
+			(errcode_for_file_access(),
+			 errmsg("could not write file \"%s\": %m", PGSIQ_DUMP_FILE ".tmp")));
+	if (file)
+		FreeFile(file);
+	unlink(PGSIQ_DUMP_FILE ".tmp");
 }
 
 /* ---------- executor hooks (nesting level tracking) ---------- */

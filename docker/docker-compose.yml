@@ -1,0 +1,25 @@
+# Playground and test runner.
+#   docker compose -f docker/docker-compose.yml up -d db      # playground on localhost:55432
+#   docker compose -f docker/docker-compose.yml run --rm test # full test suite in the container
+services:
+  db:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args: { PG_MAJOR: "${PG_MAJOR:-17}" }
+    environment:
+      POSTGRES_PASSWORD: postgres
+    command: >
+      postgres
+        -c shared_preload_libraries=pg_stat_statements,pg_stat_plans,pg_stat_index_queries
+        -c compute_query_id=on
+    ports: ["55432:5432"]
+
+  test:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args: { PG_MAJOR: "${PG_MAJOR:-17}" }
+    user: postgres
+    entrypoint: ["bash", "-lc"]
+    command: ["make installcheck && if [ \"$${PG_MAJOR}\" -ge 16 ]; then make -C sql_edition installcheck; fi"]

@@ -1,0 +1,59 @@
+-- Drop-impact check with HypoPG + EXPLAIN (GENERIC_PLAN).
+CREATE EXTENSION hypopg;
+SELECT count(*) FROM o WHERE c = 7;
+ count 
+-------
+   100
+(1 row)
+
+SELECT uses_index_now, uses_index_after, plan_changed,
+       cost_without > cost_with AS gets_more_expensive, note, query
+  FROM index_deps.index_drop_impact('o_c_idx')
+ WHERE query LIKE '%FROM o WHERE c =%';
+ uses_index_now | uses_index_after | plan_changed | gets_more_expensive |              note              |                query                
+----------------+------------------+--------------+---------------------+--------------------------------+-------------------------------------
+ t              | f                | t            | t                   | candidates from captured plans | SELECT count(*) FROM o WHERE c = $1
+(1 row)
+
+-- The index is never left hidden.
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+ still_hidden 
+--------------
+            0
+(1 row)
+
+-- Error path: a dependent query that no longer plans (column dropped).
+ALTER TABLE o ADD COLUMN x int;
+SELECT count(*) FROM o WHERE c = 9 AND x IS NULL;
+ count 
+-------
+   100
+(1 row)
+
+ALTER TABLE o DROP COLUMN x;
+SELECT note LIKE 'skipped: column "x" does not exist%' AS skipped_cleanly
+  FROM index_deps.index_drop_impact('o_c_idx')
+ WHERE query LIKE '%x IS NULL%';
+ skipped_cleanly 
+-----------------
+ t
+(1 row)
+
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+ still_hidden 
+--------------
+            0
+(1 row)
+
+-- Non-read queries are skipped unless asked.
+UPDATE o SET s = s WHERE c = 11;
+SELECT note FROM index_deps.index_drop_impact('o_c_idx') WHERE query LIKE 'UPDATE o%';
+                                 note                                 
+----------------------------------------------------------------------
+ skipped: not a read query (set p_include_dml => true to EXPLAIN DML)
+(1 row)
+
+-- Errors
+SELECT index_deps.index_drop_impact('o'::regclass);
+ERROR:  o is not an index
+CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer) line 29 at RAISE

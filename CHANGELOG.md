@@ -1,0 +1,12 @@
+# Changelog
+
+## 0.2 (2026-10-21)
+- Counters persist across clean restarts (`pg_stat_index_queries.save`, default on); invalid files are ignored and reported.
+- New view `pg_index_dependents_rollup` for partitioned tables.
+- Upgrade script 0.1 → 0.2.
+- TAP tests: persistence (including a real crash) and eviction.
+- New SQL edition `pg_index_deps` (`sql_edition/`): dependency views from captured plans (aurora_stat_plans, pg_stat_plans) and `index_drop_impact()` using HypoPG + EXPLAIN (GENERIC_PLAN). Plain and pg_tle installers for RDS/Aurora.
+
+## 0.1 (2026-10-15)
+- Executor hooks record which query IDs use each index, planned vs executed.
+- Views: `pg_stat_index_queries`, `pg_index_dependents`, `pg_index_no_dependents`, `pg_stat_index_queries_info`.

@@ -5,31 +5,65 @@ on:
   pull_request:
 
 jobs:
-  test:
+  native:
+    name: native (PG ${{ matrix.pg }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         pg: [15, 16, 17, 18]
+    env:
+      PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install PostgreSQL ${{ matrix.pg }} from PGDG
+      - name: Install PostgreSQL ${{ matrix.pg }} (PGDG)
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-common
+          sudo apt-get install -y postgresql-common libipc-run-perl
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }}
-
-      - name: Build
-        run: make PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
-
+      - name: Build (warnings are errors)
+        run: make PG_CONFIG=$PG_CONFIG COPT="-Werror"
       - name: Install
-        run: sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+        run: sudo make install PG_CONFIG=$PG_CONFIG
+      - name: Regression and TAP tests
+        run: make installcheck PG_CONFIG=$PG_CONFIG
+      - name: Show diffs and logs on failure
+        if: failure()
+        run: |
+          cat regression.diffs 2>/dev/null || true
+          tail -n 100 tmp_check/log/* 2>/dev/null || true
 
-      - name: Regression tests
-        run: make installcheck PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
-
+  sql-edition:
+    name: sql edition (PG ${{ matrix.pg }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [16, 17, 18]
+    env:
+      PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL ${{ matrix.pg }}, HypoPG (PGDG)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common libkrb5-dev libzstd-dev
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }} postgresql-${{ matrix.pg }}-hypopg
+      - name: Build pg_stat_plans
+        run: |
+          git clone --depth 1 https://github.com/pganalyze/pg_stat_plans /tmp/pg_stat_plans
+          make -C /tmp/pg_stat_plans PG_CONFIG=$PG_CONFIG
+          sudo make -C /tmp/pg_stat_plans install PG_CONFIG=$PG_CONFIG
+      - name: Install and test the SQL edition
+        run: |
+          sudo make -C sql_edition install PG_CONFIG=$PG_CONFIG
+          make -C sql_edition installcheck PG_CONFIG=$PG_CONFIG
+      - name: Check generated installers are up to date
+        run: |
+          make -C sql_edition -B managed PG_CONFIG=$PG_CONFIG
+          git diff --exit-code sql_edition/install.sql sql_edition/install_pg_tle.sql
       - name: Show diffs on failure
         if: failure()
-        run: cat regression.diffs || true
+        run: cat sql_edition/regression.diffs 2>/dev/null || true

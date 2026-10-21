@@ -1,6 +1,6 @@
 # pg_stat_index_queries
 
-**Which queries use this index?** Postgres tells you how many times an index was scanned (`pg_stat_user_indexes.idx_scan`) and, since PG 16, when it was last used. It doesn't tell you *which queries* depend on it. This extension does.
+**Which queries use this index?** Postgres tells you how many times an index was scanned (`idx_scan`) and, since PG 16, when it was last used. It never tells you *which queries* depend on it. This repository answers that question, and estimates what happens to those queries if the index is dropped.
 
 ```sql
 SELECT indexname, queryid, calls_executed, last_seen
@@ -8,21 +8,21 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-Use it before you drop, rebuild or replace an index, during upgrades, and when cleaning up overlapping indexes.
+> **Status: 0.2, experimental.** Tested on PostgreSQL 16. CI is set up for 15–18 but hasn't run yet. Don't rely on it in production until CI is green and you've benchmarked it on your hardware.
 
-> **Status: 0.1, experimental.** Don't run it in production yet.
+## Two extensions in this repo
 
-## How it works
+| | `pg_stat_index_queries` (native, C) | `pg_index_deps` (SQL edition) |
+|---|---|---|
+| Runs on | Self-hosted Postgres 15–18 | Anywhere, including **Amazon RDS and Aurora** |
+| How it knows | Walks every executed plan | Reads captured plan text (`aurora_stat_plans` on Aurora, `pg_stat_plans` self-hosted) |
+| Accuracy | Exact; separates "planned" from "executed" | Approximate: calls per plan that names the index |
+| Drop-impact check | — | `index_deps.index_drop_impact()` (PG 16+, HypoPG) |
+| Install | `shared_preload_libraries` + `CREATE EXTENSION` | `CREATE EXTENSION`, plain `install.sql`, or pg_tle |
 
-At the end of each statement, the extension walks the executed plan tree and records every index used by Index Scan, Index Only Scan and Bitmap Index Scan nodes. Counters live in shared memory, keyed by `(database, index, queryid, toplevel)`, the same way pg_stat_statements works.
+The drop-impact check works with either: if the native extension is installed it uses its exact dependents.
 
-- `calls_planned`: statements whose plan included the index.
-- `calls_executed`: statements where the index scan actually ran. An index can be in a plan but never touched, for example under a false one-time filter or an empty outer side of a join.
-- Query text isn't stored. Join to `pg_stat_statements` on `(dbid, queryid)`.
-
-## Install
-
-Requires PostgreSQL 15–18 and the server headers (`postgresql-server-dev-NN`).
+## Quick start (self-hosted, native)
 
 ```bash
 make && sudo make install
@@ -32,86 +32,96 @@ make && sudo make install
 
 ```
 shared_preload_libraries = 'pg_stat_index_queries'   # restart required
-compute_query_id = on        # or 'auto' (the extension enables it)
+compute_query_id = on
 ```
 
 ```sql
 CREATE EXTENSION pg_stat_index_queries;
+-- ... let the workload run (include month-end jobs!) ...
+SELECT * FROM pg_index_no_dependents;          -- candidates to drop, with tracked_since
+SELECT * FROM pg_index_dependents WHERE indexname = 'my_idx';
 ```
 
-Install it on **every replica** too. Each server only sees its own queries, and replicas often depend on indexes the primary never uses.
+Install it on **every replica** too: replicas often depend on indexes the primary never uses.
 
-## Views and functions
+## Quick start (RDS / Aurora, SQL edition)
+
+See [docs/INSTALL.md](docs/INSTALL.md) for step-by-step instructions. In short:
+
+```sql
+-- Aurora: set aurora_compute_plan_id = on in the parameter group first.
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS hypopg;          -- for the drop-impact check
+\i sql_edition/install.sql                        -- or install_pg_tle.sql
+SELECT * FROM index_deps.index_dependents WHERE indexname = 'my_idx';
+SELECT * FROM index_deps.index_drop_impact('public.my_idx');
+```
+
+`index_drop_impact` hides the index **for your session only** (HypoPG), re-plans each dependent query with `EXPLAIN (GENERIC_PLAN)` and reports cost before and after, and whether the plan changes. It never executes a query and never drops anything.
+
+## Objects
+
+**Native extension**
 
 | Object | What it gives you |
 |---|---|
 | `pg_stat_index_queries` | Raw counters: dbid, indexrelid, queryid, toplevel, calls_executed, calls_planned, first_seen, last_seen |
-| `pg_index_dependents` | Same, with schema, table and index names, for the current database |
-| `pg_index_no_dependents` | User indexes with no executed use since `tracked_since` (excludes PK, unique and constraint indexes) |
-| `pg_stat_index_queries_info` | Entries tracked, evictions (`dealloc`), `stats_reset` time |
-| `pg_stat_index_queries_reset()` | Clear all counters (superuser by default) |
+| `pg_index_dependents` | Same, with schema, table and index names, current database |
+| `pg_index_dependents_rollup` | Partition indexes rolled up to the partitioned (parent) index |
+| `pg_index_no_dependents` | User indexes with no executed use since `tracked_since` (excludes PK, unique, constraint indexes) |
+| `pg_stat_index_queries_info` | Entries, evictions (`dealloc`), `stats_reset` |
+| `pg_stat_index_queries_reset()` | Clear counters (superuser by default) |
 
-With query text:
+**SQL edition (`index_deps` schema)**
 
-```sql
-SELECT d.indexname, d.calls_executed, left(s.query, 80) AS query
-  FROM pg_index_dependents d
-  LEFT JOIN pg_stat_statements s
-         ON s.queryid = d.queryid AND s.toplevel = d.toplevel
- WHERE d.indexname = 'orders_customer_id_idx'
- ORDER BY d.calls_executed DESC;
-```
+| Object | What it gives you |
+|---|---|
+| `plan_index_usage` | Every index reference found in captured plans |
+| `index_dependents` | Per index and query: plans, calls, scan types, `ambiguous` flag |
+| `index_no_dependents` | Indexes no captured plan mentions |
+| `index_drop_impact(index)` | Cost and plan change per dependent query if the index were gone |
+| `config` | `plan_source`: auto, aurora_stat_plans, pg_stat_plans, none |
 
-> **Before dropping anything** from `pg_index_no_dependents`, check `tracked_since`. Month-end jobs, reports and replicas need to have run while tracking was on.
-
-## Settings
+## Settings (native)
 
 | Setting | Default | Notes |
 |---|---|---|
-| `pg_stat_index_queries.max` | 10000 | Max tracked (index, query) pairs. Restart to change. Least recently seen entries are evicted when full. |
-| `pg_stat_index_queries.track` | `top` | `top`, `all` (include statements inside functions and DO blocks), or `none` |
-| `pg_stat_index_queries.track_catalog` | off | Also track indexes on system catalogs |
+| `pg_stat_index_queries.max` | 10000 | Tracked (index, query) pairs. Restart to change. Least recently seen evicted when full |
+| `pg_stat_index_queries.track` | `top` | `top`, `all` (include statements inside functions), `none` |
+| `pg_stat_index_queries.track_catalog` | off | Also track system catalog indexes |
+| `pg_stat_index_queries.save` | on | Keep counters across clean restarts (lost on crash) |
 
 ## Overhead
 
-Early result on a 2-vCPU container, PG 16, pgbench scale 50, `-S -M prepared -c 4`, 3 × 20 s runs:
-
-| | Mean TPS |
-|---|---|
-| Without | 107,997 |
-| With | 107,564 (−0.4%, within run-to-run noise) |
-
-A proper benchmark on real hardware, with a wide schema, is on the roadmap.
-
-## Limitations (0.1)
-
-- Counters are lost on restart; persistence is planned for 0.2.
-- Bitmap Index Scans are always counted as executed, because Postgres creates their scan state at startup.
-- Parallel workers aren't counted separately; the leader records the statement once.
-- Child partition indexes are recorded individually; rolling them up to the parent index is planned.
-- Doesn't load on Amazon RDS or Aurora, which only allow approved extensions.
+Early result, 2-vCPU container, PG 16, pgbench scale 50, `-S -M prepared -c 4`, 3 × 20 s: **107,997 tps without, 107,564 with (−0.4%, within noise)**. Proper numbers on a 4–8 vCPU machine are a roadmap item: run `make bench`.
 
 ## Tests
 
 ```bash
-make installcheck   # starts its own temp instance with the library preloaded; run as a non-root user
+make installcheck                 # native: 3 regression suites + 2 TAP tests (persistence incl. a real crash, eviction)
+make -C sql_edition installcheck  # SQL edition: parsing, live pg_stat_plans, drop-impact (needs pg_stat_plans + HypoPG)
+make test-all                     # both
 ```
 
-Covers index scans, index-only scans, bitmap scans, planned-but-not-executed, prepared statements, nested statements (`track = top` vs `all`), the helper views, the catalog filter and reset.
+Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 
-## Roadmap
+## Docs
 
-- 0.2: persist across restarts; roll partitions up to the parent index; eviction test
-- 0.3: "what would break" view: queries whose only index access path is this index
-- Benchmarks with 20+ indexes per table; CI against PG 15–18
+- [docs/INSTALL.md](docs/INSTALL.md): self-hosted, RDS, Aurora
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how it works inside
+- [docs/TESTING.md](docs/TESTING.md): test suites, what is and isn't verified
+- [docs/PRD-and-Spec.md](docs/PRD-and-Spec.md): product requirements and full spec
+- [docs/DECISIONS.md](docs/DECISIONS.md), [docs/ROADMAP.md](docs/ROADMAP.md)
+- [AGENTS.md](AGENTS.md): instructions for coding agents (Codex, Claude Code)
 
-## Related work
+## Limitations
 
-- [pg_stat_statements](https://www.postgresql.org/docs/current/pgstatstatements.html): per-query stats, no index info
-- [pg_qualstats](https://github.com/powa-team/pg_qualstats): predicates used, not the index chosen
-- [pg_stat_plans](https://github.com/pganalyze/pg_stat_plans): stores plans per query, no index-centric view
-- [HypoPG](https://github.com/HypoPG/hypopg): hypothetical indexes; pairs well with this for "what if I drop it"
+- Native extension: self-hosted only (RDS/Aurora don't allow custom C extensions).
+- Bitmap Index Scans always count as executed (Postgres builds their scan state at startup).
+- Counters are lost on crash (saved only at clean shutdown).
+- SQL edition only sees queries whose plans were captured, and loses ones evicted from pg_stat_statements.
+- Drop-impact uses generic-plan cost estimates, not measured latency.
 
 ## License
 
-PostgreSQL License. See `LICENSE`.
+PostgreSQL License. See [LICENSE](LICENSE).

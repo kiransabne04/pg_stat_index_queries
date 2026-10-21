@@ -6,3 +6,7 @@ tmp_check/
 log/
 regression.diffs
 regression.out
+sql_edition/results/
+sql_edition/tmp_check/
+sql_edition/regression.*
+bench/results/*.tmp

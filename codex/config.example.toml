@@ -1,0 +1,7 @@
+# Example Codex settings for this repo. Copy what you need into ~/.codex/config.toml.
+# Key names follow the Codex CLI docs at the time of writing; check your version.
+approval_policy = "on-request"     # ask before commands outside the workspace
+sandbox_mode = "workspace-write"   # edit files in the repo; no writes elsewhere
+
+[sandbox_workspace_write]
+network_access = false             # builds and tests need no network once packages are installed

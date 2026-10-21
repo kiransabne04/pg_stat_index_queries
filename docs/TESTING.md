@@ -21,7 +21,8 @@ All suites start their own temporary server, so they don't touch any existing cl
 | Overhead (pgbench -S, 2 vCPU container) | −0.4%, within noise |
 | PG 15, 17, 18 | **Not yet run**: CI workflow provided |
 | `aurora_stat_plans` adapter | **Not yet run on Aurora**: column names taken from AWS docs |
-| `install_pg_tle.sql` | **Not yet run** (pg_tle not installed here) |
+| `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk |
+| Drop-impact fallback with no plan source (RDS-like) | Verified: candidates from query text, index use before/after correct |
 | Docker image | **Not yet built** (no Docker daemon available when written) |
 
 ## Updating expected output

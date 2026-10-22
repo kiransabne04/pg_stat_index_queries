@@ -12,6 +12,30 @@ All suites start their own temporary server, so they don't touch any existing cl
 
 Tests that read pg_stat_plans call counts must run `SELECT pg_stat_force_next_flush();` first: pg_stat_plans uses the cumulative statistics system, which flushes counters lazily.
 
+## Native build on macOS (Homebrew)
+
+Docker (`docker/README.md`) is the supported path; this is only for quick C edit/compile cycles. Verified on macOS 26 arm64 with Homebrew `postgresql@17` 17.11 and Apple clang 21: build warning-free with `-Werror`, regression and TAP tests pass. The SQL edition is not set up natively (it needs pg_stat_plans and HypoPG built from source); use Docker for it.
+
+```bash
+brew install postgresql@17          # keg-only, doesn't change PATH
+PGC=/opt/homebrew/opt/postgresql@17/bin/pg_config
+make PG_CONFIG=$PGC COPT=-Werror && make PG_CONFIG=$PGC install
+make PG_CONFIG=$PGC installcheck    # regression only, see below
+```
+
+Homebrew's PostgreSQL is configured without `--enable-tap-tests` and doesn't ship `src/test/perl`, so plain `make installcheck` **skips the TAP tests silently** (it prints "TAP tests not enabled" and still exits 0). To run them, get the Perl test modules from the source tarball of the same version and IPC::Run from CPAN, unpack them anywhere outside the repo, and pass both in:
+
+```bash
+# from https://ftp.postgresql.org/pub/source/v17.11/postgresql-17.11.tar.bz2 (check the .sha256)
+#   tar -xjf postgresql-17.11.tar.bz2 postgresql-17.11/src/test/perl
+# from https://cpan.metacpan.org/authors/id/T/TO/TODDR/IPC-Run-20260402.0.tar.gz
+PERL5LIB=/path/to/IPC-Run-20260402.0/lib \
+make installcheck PG_CONFIG=$PGC enable_tap_tests=yes PROVE=prove \
+  PROVE_FLAGS="-I /path/to/postgresql-17.11/src/test/perl"
+```
+
+Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: PASS`; if those lines are missing, TAP didn't run.
+
 ## Verified so far (22 Oct 2026)
 
 | Item | Status |
@@ -23,6 +47,7 @@ Tests that read pg_stat_plans call counts must run `SELECT pg_stat_force_next_fl
 | Overhead (pgbench -S, 2 vCPU container) | −0.4%, within noise |
 | Native build (`COPT=-Werror`) + regression + TAP, PG 15.19, 16.15, 17.11, 18.6 | Pass (Docker, Debian PGDG images, arm64) |
 | SQL edition tests, PG 16, 17, 18 (pg_stat_plans 2.1 + HypoPG 1.4.3) | Pass (Docker, arm64). PG 15 skipped by design |
+| Native build + regression + TAP on macOS arm64, Homebrew PG 17.11 (clang 21, `-Werror`) | Pass |
 | GitHub Actions CI workflow | **Not yet run** on GitHub |
 | `aurora_stat_plans` adapter | **Not yet run on Aurora**: column names taken from AWS docs |
 | `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk |

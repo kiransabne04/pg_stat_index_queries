@@ -11,3 +11,4 @@ sql_edition/results/
 sql_edition/tmp_check/
 sql_edition/regression.*
 bench/results/*.tmp
+ci-local-logs/

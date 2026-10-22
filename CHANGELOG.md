@@ -5,6 +5,7 @@
 - Tests: regression instances run with `--no-locale`, so name ordering no longer depends on the machine's locale (SQL edition `parse` failed under `en_US.utf8`).
 - Tests: SQL edition `dependents` forces a stats flush before checking pg_stat_plans call counts (failed intermittently, seen on PG 18).
 - Docker: verified on PG 15–18 (arm64); build with `-Werror`, per-version image tags, `.dockerignore`, fast edit/test loop in `docker/README.md`.
+- `scripts/ci-local.sh`: run the GitHub Actions jobs locally in Docker, using the steps from `ci.yml`.
 - `examples/playground.sql`: rerunnable smoke test on synthetic data for both extensions.
 - Docs: native macOS (Homebrew) build and test instructions; Homebrew skips TAP tests silently unless forced. `.gitignore` covers `*.dylib`.
 

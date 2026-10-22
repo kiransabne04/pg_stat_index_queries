@@ -12,6 +12,19 @@ All suites start their own temporary server, so they don't touch any existing cl
 
 Tests that read pg_stat_plans call counts must run `SELECT pg_stat_force_next_flush();` first: pg_stat_plans uses the cumulative statistics system, which flushes counters lazily.
 
+## Running CI locally
+
+`scripts/ci-local.sh` runs the jobs of `.github/workflows/ci.yml` in Docker without GitHub or `act`. Each job gets a clean `ubuntu:24.04` container (linux/amd64 by default, like GitHub's runners), a fresh clone of the committed HEAD, and the workflow's own `run:` steps (read from the YAML by `scripts/ci_steps.py`), executed as a non-root user with sudo.
+
+```bash
+scripts/ci-local.sh                            # all 7 jobs (native 15-18, sql-edition 16-18)
+scripts/ci-local.sh sql-edition 18             # one job
+CI_WORKTREE=1 scripts/ci-local.sh native 18    # include uncommitted changes
+CI_PLATFORM=linux/arm64 scripts/ci-local.sh    # skip amd64 emulation on Apple Silicon
+```
+
+Logs go to `ci-local-logs/`. Under amd64 emulation on Apple Silicon a job takes about 2–4 minutes.
+
 ## Native build on macOS (Homebrew)
 
 Docker (`docker/README.md`) is the supported path; this is only for quick C edit/compile cycles. Verified on macOS 26 arm64 with Homebrew `postgresql@17` 17.11 and Apple clang 21: build warning-free with `-Werror`, regression and TAP tests pass. The SQL edition is not set up natively (it needs pg_stat_plans and HypoPG built from source); use Docker for it.

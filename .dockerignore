@@ -1,0 +1,12 @@
+# Keep host build/test artifacts out of the image (a macOS .o or .dylib would
+# break the Linux build).
+.git
+**/*.o
+**/*.so
+**/*.dylib
+**/*.bc
+**/tmp_check
+**/results
+**/log
+**/regression.diffs
+**/regression.out

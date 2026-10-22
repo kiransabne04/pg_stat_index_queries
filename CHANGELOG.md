@@ -4,6 +4,7 @@
 - Build fix for PostgreSQL 15: `queryjumble.h` is under `utils/` before 16.
 - Tests: regression instances run with `--no-locale`, so name ordering no longer depends on the machine's locale (SQL edition `parse` failed under `en_US.utf8`).
 - Tests: SQL edition `dependents` forces a stats flush before checking pg_stat_plans call counts (failed intermittently, seen on PG 18).
+- Docker: verified on PG 15–18 (arm64); build with `-Werror`, per-version image tags, `.dockerignore`, fast edit/test loop in `docker/README.md`.
 
 ## 0.2 (2026-10-21)
 - Counters persist across clean restarts (`pg_stat_index_queries.save`, default on); invalid files are ignored and reported.

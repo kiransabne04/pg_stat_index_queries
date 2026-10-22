@@ -3,6 +3,7 @@
 #   docker compose -f docker/docker-compose.yml run --rm test # full test suite in the container
 services:
   db:
+    image: pg_stat_index_queries:pg${PG_MAJOR:-17}
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -16,6 +17,7 @@ services:
     ports: ["55432:5432"]
 
   test:
+    image: pg_stat_index_queries:pg${PG_MAJOR:-17}
     build:
       context: ..
       dockerfile: docker/Dockerfile

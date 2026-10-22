@@ -17,7 +17,7 @@ RUN if [ "${PG_MAJOR}" -ge 16 ]; then \
 
 COPY --chown=postgres:postgres . /src
 WORKDIR /src
-RUN make && make install && make -C sql_edition install
+RUN make COPT=-Werror && make install && make -C sql_edition install
 
 # Playground defaults (override with -c on the command line).
 ENV PG_MAJOR=${PG_MAJOR}

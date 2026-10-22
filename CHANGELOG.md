@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- **Fix (0.3):** `pg_index_no_dependents` listed a partitioned (parent) index as unused even when its partition indexes were used, so it looked safe to drop. Now a parent index counts as used if any index in its partition tree was used, its size is the whole tree, and attached partition indexes aren't listed separately.
+- **Fix (SQL edition 0.2):** `index_deps.index_no_dependents` listed every non-unique index when there is no plan source (RDS). It now returns no rows then, and has the same partition handling as the native view.
 - Build fix for PostgreSQL 15: `queryjumble.h` is under `utils/` before 16.
 - Tests: regression instances run with `--no-locale`, so name ordering no longer depends on the machine's locale (SQL edition `parse` failed under `en_US.utf8`).
 - Tests: SQL edition `dependents` forces a stats flush before checking pg_stat_plans call counts (failed intermittently, seen on PG 18).

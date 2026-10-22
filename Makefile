@@ -2,7 +2,8 @@ MODULE_big = pg_stat_index_queries
 OBJS = pg_stat_index_queries.o
 
 EXTENSION = pg_stat_index_queries
-DATA = pg_stat_index_queries--0.1.sql pg_stat_index_queries--0.2.sql pg_stat_index_queries--0.1--0.2.sql
+DATA = pg_stat_index_queries--0.1.sql pg_stat_index_queries--0.2.sql pg_stat_index_queries--0.3.sql \
+       pg_stat_index_queries--0.1--0.2.sql pg_stat_index_queries--0.2--0.3.sql
 PGFILEDESC = "pg_stat_index_queries - track which queries use each index"
 
 REGRESS = basic partitions upgrade

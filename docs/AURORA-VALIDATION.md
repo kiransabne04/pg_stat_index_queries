@@ -72,7 +72,7 @@ Then:
 - [ ] Install as in step 2. `SELECT index_deps.resolved_plan_source();` returns `none`.
 - [ ] Run the script, tee to `managed_check-rds.out`.
 - [ ] Pass if: section 8 `index_dependents` is empty; section 10 shows the `WHERE a = $1` query with `uses_index_now = t`, `uses_index_after = f`, note `candidates from query text mentions table`; section 12 `still_hidden = 0`.
-- [ ] Known issue: section 8 `index_no_dependents` lists **every** non-unique index on RDS, because with no plan source nothing has a recorded dependent. Don't treat that list as "safe to drop". (Tracked for a fix.)
+- [ ] Section 8 `index_no_dependents` is empty too (SQL edition 0.2+; 0.1 listed every non-unique index there).
 - [ ] Delete the instance.
 
 ## 5. Bring results back into the repo

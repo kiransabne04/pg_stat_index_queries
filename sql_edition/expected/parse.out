@@ -53,12 +53,37 @@ SELECT indexname
  o_unused_idx
 (1 row)
 
+-- Partitioned table: plans name the partition indexes. The parent index
+-- counts as referenced; attached partition indexes aren't listed.
+CREATE TABLE pt (id int, k int, v int) PARTITION BY RANGE (id);
+CREATE TABLE pt_1 PARTITION OF pt FOR VALUES FROM (0) TO (100);
+CREATE TABLE pt_2 PARTITION OF pt FOR VALUES FROM (100) TO (200);
+CREATE INDEX pt_k_idx ON pt (k);
+CREATE INDEX pt_v_idx ON pt (v);
+INSERT INTO fixture_plans VALUES
+ (6, 61, 4, E'Append\n  ->  Index Scan using pt_1_k_idx on pt_1\n        Index Cond: (k = 1)\n  ->  Index Scan using pt_2_k_idx on pt_2\n        Index Cond: (k = 1)');
+SELECT tablename, indexname
+  FROM index_deps.index_no_dependents
+ WHERE tablename LIKE 'pt%'
+ ORDER BY indexname;
+ tablename | indexname 
+-----------+-----------
+ pt        | pt_v_idx
+(1 row)
+
 -- 'none' returns nothing and doesn't error
 UPDATE index_deps.config SET value = 'none' WHERE key = 'plan_source';
 SELECT count(*) AS rows_with_none FROM index_deps.plan_index_usage;
  rows_with_none 
 ----------------
               0
+(1 row)
+
+-- With no plan source nothing is known, so no index is reported as unused.
+SELECT count(*) AS no_dependents_with_none FROM index_deps.index_no_dependents;
+ no_dependents_with_none 
+-------------------------
+                       0
 (1 row)
 
 UPDATE index_deps.config SET value = 'auto' WHERE key = 'plan_source';

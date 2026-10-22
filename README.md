@@ -68,7 +68,7 @@ SELECT * FROM index_deps.index_drop_impact('public.my_idx');
 | `pg_stat_index_queries` | Raw counters: dbid, indexrelid, queryid, toplevel, calls_executed, calls_planned, first_seen, last_seen |
 | `pg_index_dependents` | Same, with schema, table and index names, current database |
 | `pg_index_dependents_rollup` | Partition indexes rolled up to the partitioned (parent) index |
-| `pg_index_no_dependents` | User indexes with no executed use since `tracked_since` (excludes PK, unique, constraint indexes) |
+| `pg_index_no_dependents` | User indexes with no executed use since `tracked_since` (excludes PK, unique, constraint indexes). Partitioned tables: one row per parent index, unused only if no partition index was used; size is the whole tree |
 | `pg_stat_index_queries_info` | Entries, evictions (`dealloc`), `stats_reset` |
 | `pg_stat_index_queries_reset()` | Clear counters (superuser by default) |
 
@@ -78,7 +78,7 @@ SELECT * FROM index_deps.index_drop_impact('public.my_idx');
 |---|---|
 | `plan_index_usage` | Every index reference found in captured plans |
 | `index_dependents` | Per index and query: plans, calls, scan types, `ambiguous` flag |
-| `index_no_dependents` | Indexes no captured plan mentions |
+| `index_no_dependents` | Indexes no captured plan mentions (partition-aware like the native view). Empty when there is no plan source (`none`, e.g. RDS) |
 | `index_drop_impact(index)` | Cost and plan change per dependent query if the index were gone |
 | `config` | `plan_source`: auto, aurora_stat_plans, pg_stat_plans, none |
 

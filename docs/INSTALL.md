@@ -76,7 +76,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
 
 ## 4. Amazon RDS for PostgreSQL
 
-RDS has no per-plan source, so the dependency views are empty there. The **drop-impact check still works** (PG 16+): with no captured plans it falls back to every statement in pg_stat_statements that mentions the index's table.
+RDS has no per-plan source, so the dependency views are empty there (since SQL edition 0.2 that includes `index_no_dependents`; 0.1 listed every index there, so upgrade before relying on it). The **drop-impact check still works** (PG 16+): with no captured plans it falls back to every statement in pg_stat_statements that mentions the index's table.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;

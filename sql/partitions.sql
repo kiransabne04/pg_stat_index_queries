@@ -19,3 +19,15 @@ SELECT indexrelid::regclass::text AS index, calls_executed
 -- roll-up: one row for the parent index, two partitions used
 SELECT indexname, partitions_used, calls_executed, partition_scans_executed
   FROM pg_index_dependents_rollup WHERE tablename = 'ev';
+-- no_dependents: the parent index counts as used when a partition index was
+-- used; an unused parent index is listed once with the size of the whole
+-- tree; attached partition indexes are not listed on their own; an index on
+-- a single partition (no parent) is listed by itself.
+CREATE INDEX ev_v_idx ON ev (v);
+CREATE INDEX ev_1_only_idx ON ev_1 (v);
+SELECT tablename, indexname, index_bytes > 0 AS has_size
+  FROM pg_index_no_dependents WHERE tablename LIKE 'ev%' ORDER BY indexname;
+-- counters left behind by dropped partition indexes don't break the view
+DROP INDEX ev_tenant_idx;
+SELECT tablename, indexname
+  FROM pg_index_no_dependents WHERE tablename LIKE 'ev%' ORDER BY indexname;

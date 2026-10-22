@@ -20,3 +20,18 @@ SELECT to_regclass('pg_index_dependents_rollup') IS NOT NULL AS rollup_present_i
  t
 (1 row)
 
+-- 0.2 -> 0.3: pg_index_no_dependents understands partitioned indexes.
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.3';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+ extversion 
+------------
+ 0.3
+(1 row)
+
+SELECT pg_get_viewdef('pg_index_no_dependents'::regclass) LIKE '%pg_partition_root%'
+       AS no_dependents_is_partition_aware;
+ no_dependents_is_partition_aware 
+----------------------------------
+ t
+(1 row)
+

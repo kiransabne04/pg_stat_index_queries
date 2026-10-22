@@ -145,7 +145,7 @@ SELECT indexname, queryid, plans, calls, scan_types, ambiguous, source
 -- Expected with a plan source: t_a_idx (bitmap), t_pkey (index, and
 -- index_only for the backward scan) and "T Mixed Case Idx" (index_only);
 -- t_b_unused_idx missing.
--- Expected on RDS (no plan source): no rows.
+-- Expected on RDS (no plan source): no rows here and in the next query.
 SELECT indexname, pg_size_pretty(index_bytes) AS size, source
   FROM index_deps.index_no_dependents
  WHERE schemaname = 'index_deps_check'

@@ -34,7 +34,7 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 
 ### SQL objects
 - `pg_stat_index_queries()` set-returning function (materialized SRF) and view.
-- Helper views join `pg_class` / `pg_index` for names; `pg_index_dependents_rollup` maps child indexes to their partitioned parent with `pg_partition_root()` and reports `calls_executed` as the max per partition (lower bound on statements) and `partition_scans_executed` as the sum.
+- Helper views join `pg_class` / `pg_index` for names; `pg_index_dependents_rollup` maps child indexes to their partitioned parent with `pg_partition_root()` and reports `calls_executed` as the max per partition (lower bound on statements) and `partition_scans_executed` as the sum. `pg_index_no_dependents` (0.3) uses the same mapping: a partitioned index is used if any index in its tree is, and attached partition indexes aren't listed on their own.
 
 ## SQL edition (`sql_edition/pg_index_deps--0.1.sql`)
 
@@ -43,7 +43,7 @@ plan_source()        adapter: aurora_stat_plans | pg_stat_plans | none | test ta
 plan_index_usage     regex over text plans: Index [Only] Scan [Backward] using IDX on TBL, Bitmap Index Scan on IDX
 index_dependents     resolve names -> OIDs (table name from the same line or the Bitmap Heap Scan line);
                      same name in two schemas -> ambiguous = true
-index_no_dependents  indexes not referenced by any captured plan
+index_no_dependents  indexes not referenced by any captured plan (partition-aware; empty when plan_source = none)
 index_drop_impact()  candidates: native extension > captured plans > statements mentioning the table
                      for each: EXPLAIN (GENERIC_PLAN, FORMAT JSON) -> hypopg_hide_index -> EXPLAIN -> unhide
 ```

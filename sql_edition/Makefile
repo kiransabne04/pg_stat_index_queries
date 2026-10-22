@@ -4,6 +4,8 @@ PGFILEDESC = "pg_index_deps - SQL edition of pg_stat_index_queries"
 
 REGRESS = parse dependents drop_impact
 REGRESS_OPTS = --temp-instance=./tmp_check --temp-config=./test/pg.conf
+# C collation so ORDER BY on names is the same on every machine.
+NO_LOCALE = 1
 
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

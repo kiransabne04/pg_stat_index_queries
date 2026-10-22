@@ -8,7 +8,10 @@
 | `make -C sql_edition installcheck` | `parse`: fixture plans incl. Backward, Index Only, BitmapOr, quoted names, same-name index in two schemas (ambiguous) · `dependents`: live pg_stat_plans · `drop_impact`: cost/plan change, index never left hidden, broken query skipped cleanly, DML skipped, error on non-index |
 | `./bench/run.sh` | pgbench overhead with/without the extension |
 
-All suites start their own temporary server, so they don't touch any existing cluster. Run them as a non-root user.
+All suites start their own temporary server, so they don't touch any existing cluster. Run them as a non-root user. The regression instances run with `--no-locale` (`NO_LOCALE = 1` in both Makefiles) so `ORDER BY` on names sorts the same on every machine.
+
+Tests that read pg_stat_plans call counts must run `SELECT pg_stat_force_next_flush();` first: pg_stat_plans uses the cumulative statistics system, which flushes counters lazily.
+
 
 ## Verified so far (21 Oct 2026)
 

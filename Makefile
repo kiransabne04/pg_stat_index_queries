@@ -8,6 +8,8 @@ PGFILEDESC = "pg_stat_index_queries - track which queries use each index"
 REGRESS = basic partitions upgrade
 # Self-contained test instance with the library preloaded.
 REGRESS_OPTS = --temp-instance=./tmp_check --temp-config=./test/pg.conf
+# C collation so ORDER BY on names is the same on every machine.
+NO_LOCALE = 1
 TAP_TESTS = 1
 
 PG_CONFIG ?= pg_config

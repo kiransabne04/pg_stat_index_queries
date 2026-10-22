@@ -12,6 +12,9 @@ VACUUM ANALYZE o;
 SELECT count(*) FROM o WHERE c = 5;
 SELECT count(*) FROM o WHERE c = 6;
 SELECT id FROM o WHERE id = 42;
+-- pg_stat_plans flushes call counts lazily (up to 60 s); force it so the
+-- calls check below doesn't depend on timing.
+SELECT pg_stat_force_next_flush();
 
 SELECT index_deps.resolved_plan_source();
 SELECT indexname, calls >= 2 AS seen_twice_or_more, source

@@ -27,6 +27,14 @@ SELECT id FROM o WHERE id = 42;
  42
 (1 row)
 
+-- pg_stat_plans flushes call counts lazily (up to 60 s); force it so the
+-- calls check below doesn't depend on timing.
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
 SELECT index_deps.resolved_plan_source();
  resolved_plan_source 
 ----------------------

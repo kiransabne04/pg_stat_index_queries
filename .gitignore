@@ -12,3 +12,5 @@ sql_edition/tmp_check/
 sql_edition/regression.*
 bench/results/*.tmp
 ci-local-logs/
+# benchmark reports are committed (T03)
+!bench/results/

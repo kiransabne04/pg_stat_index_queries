@@ -39,3 +39,9 @@ Laptops, Docker Desktop (a VM on the host), emulated architectures, and burstabl
 
 - Eviction pressure: a workload with more distinct (index, query) pairs than `pg_stat_index_queries.max`, so the exclusive-lock dealloc path runs.
 - High client counts (≥ 4 × vCPU) for lock contention on the shared hash.
+
+## Runs so far
+
+| Date | Setup | Result |
+|---|---|---|
+| 2026-10-22 | Docker Desktop on Apple M5 laptop, PG 17.11 arm64, scale 50, 8 clients, 3 × 60 s (`bench/results/2026-10-22-docker-m5-notpublishable.md`) | **Not publishable.** Means −5% to −6.4%, but spread 18–75% per mode: `select_only` with the extension off fell 392k → 232k → 189k TPS over the run (thermal/VM throttling), and in run 3 the `on` runs beat the `off` runs. The changes are far inside the noise; says nothing about overhead. Harness works end to end |

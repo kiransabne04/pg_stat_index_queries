@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Build fix for PostgreSQL 15: `queryjumble.h` is under `utils/` before 16.
+
 ## 0.2 (2026-10-21)
 - Counters persist across clean restarts (`pg_stat_index_queries.save`, default on); invalid files are ignored and reported.
 - New view `pg_index_dependents_rollup` for partitioned tables.

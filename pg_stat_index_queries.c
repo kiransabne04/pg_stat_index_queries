@@ -27,7 +27,11 @@
 #include "nodes/execnodes.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/plannodes.h"
+#if PG_VERSION_NUM >= 160000
 #include "nodes/queryjumble.h"
+#else
+#include "utils/queryjumble.h"
+#endif
 #include "pgstat.h"
 #include "storage/fd.h"
 #include "storage/ipc.h"

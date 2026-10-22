@@ -7,6 +7,7 @@
 - Docker: verified on PG 15–18 (arm64); build with `-Werror`, per-version image tags, `.dockerignore`, fast edit/test loop in `docker/README.md`.
 - `scripts/ci-local.sh`: run the GitHub Actions jobs locally in Docker, using the steps from `ci.yml`.
 - T05 prep: `sql_edition/validation/managed_check.sql` and `docs/AURORA-VALIDATION.md` for validating the SQL edition on Aurora and RDS.
+- Benchmark: `bench/run.sh` interleaves off/on runs, verifies the mode, checkpoints before each run, reports spread; `--label`, `--note`, `--out`. Plan in `docs/BENCHMARK.md`.
 - `examples/playground.sql`: rerunnable smoke test on synthetic data for both extensions.
 - Docs: native macOS (Homebrew) build and test instructions; Homebrew skips TAP tests silently unless forced. `.gitignore` covers `*.dylib`.
 

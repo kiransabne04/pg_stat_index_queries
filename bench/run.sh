@@ -2,16 +2,26 @@
 # Overhead benchmark: pgbench with and without pg_stat_index_queries.
 # Runs a throwaway cluster in a temp directory. Run as a non-root user.
 #
-#   ./bench/run.sh [--scale 100] [--secs 300] [--runs 3] [--clients 8] [--wide]
+#   ./bench/run.sh [--scale 100] [--secs 300] [--runs 3] [--clients N] [--wide]
+#                  [--label NAME] [--note TEXT] [--out DIR]
 #
-# Writes bench/results/<date>-<host>.md
+# Modes are interleaved (run 1: off then on, run 2: on then off, ...) so cache
+# warm-up, table bloat and checkpoints affect both modes equally. Each run
+# starts from a CHECKPOINT and checks that the library really is (not) loaded.
+#
+# Writes <out>/<date>-<label>.md (default bench/results/<date>-<host>.md).
+# See docs/BENCHMARK.md for the plan behind publishable numbers.
 set -euo pipefail
 PG_CONFIG=${PG_CONFIG:-pg_config}
 BIN=$($PG_CONFIG --bindir)
+HERE=$(cd "$(dirname "$0")" && pwd)
 SCALE=100; SECS=300; RUNS=3; CLIENTS=$(nproc); WIDE=0
+LABEL=$(hostname -s); NOTE=""; OUTDIR=$HERE/results
 while [ $# -gt 0 ]; do case "$1" in
   --scale) SCALE=$2; shift 2;; --secs) SECS=$2; shift 2;; --runs) RUNS=$2; shift 2;;
-  --clients) CLIENTS=$2; shift 2;; --wide) WIDE=1; shift;; *) echo "unknown arg $1"; exit 1;; esac; done
+  --clients) CLIENTS=$2; shift 2;; --wide) WIDE=1; shift;;
+  --label) LABEL=$2; shift 2;; --note) NOTE=$2; shift 2;; --out) OUTDIR=$2; shift 2;;
+  *) echo "unknown arg $1"; exit 1;; esac; done
 
 DIR=$(mktemp -d); PORT=55433; H="-h $DIR -p $PORT"
 trap '$BIN/pg_ctl -D $DIR/data -m fast stop >/dev/null 2>&1 || true; rm -rf $DIR' EXIT
@@ -23,51 +33,72 @@ shared_buffers = '1GB'
 compute_query_id = on
 max_connections = 200
 CONF
-start() { $BIN/pg_ctl -D $DIR/data -l $DIR/log -w restart >/dev/null 2>&1 || $BIN/pg_ctl -D $DIR/data -l $DIR/log -w start >/dev/null; }
-start
-$BIN/createdb $H bench
-$BIN/pgbench $H -i -s $SCALE -q bench >/dev/null 2>&1
 
-if [ $WIDE = 1 ]; then
-  $BIN/psql $H -d bench -q -f "$(dirname "$0")/wide_schema.sql"
-fi
-
-run_set() {  # $1 = label, $2 = pgbench args
-  for i in $(seq 1 $RUNS); do
-    tps=$($BIN/pgbench $H $2 -c $CLIENTS -j $CLIENTS -T $SECS bench 2>/dev/null | awk '/^tps/ {print $3; exit}')
-    echo "$1,$i,$tps"
-  done
+# set_mode off|on: restart with or without the library preloaded.
+set_mode() {
+  local libs=""
+  [ "$1" = on ] && libs=pg_stat_index_queries
+  $BIN/pg_ctl -D $DIR/data -m fast stop >/dev/null 2>&1 || true
+  $BIN/pg_ctl -D $DIR/data -l $DIR/log -w -o "-c shared_preload_libraries=$libs" start >/dev/null
+  local got
+  got=$($BIN/psql $H -d postgres -XAtc "SHOW shared_preload_libraries")
+  if [ "$got" != "$libs" ]; then echo "mode $1: expected '$libs', server has '$got'" >&2; exit 1; fi
 }
 
+set_mode off
+$BIN/createdb $H bench
+$BIN/pgbench $H -i -s $SCALE -q bench >/dev/null 2>&1
+if [ $WIDE = 1 ]; then
+  $BIN/psql $H -d bench -q -f "$HERE/wide_schema.sql"
+fi
+
+WORKLOADS="select_only tpcb"; [ $WIDE = 1 ] && WORKLOADS="$WORKLOADS wide"
+args_for() { case "$1" in
+  select_only) echo "-n -S -M prepared";;
+  tpcb) echo "-n -M prepared";;
+  wide) echo "-n -M prepared -f $HERE/wide_workload.sql";; esac; }
+
 OUT=$DIR/raw.csv
-for mode in off on; do
-  if [ $mode = on ]; then
-    echo "shared_preload_libraries = 'pg_stat_index_queries'" >> $DIR/data/postgresql.conf
-    start
-  fi
-  run_set "select_only,$mode" "-n -S -M prepared" >> $OUT
-  run_set "tpcb,$mode" "-n -M prepared" >> $OUT
-  if [ $WIDE = 1 ]; then run_set "wide,$mode" "-n -M prepared -f $(dirname "$0")/wide_workload.sql" >> $OUT; fi
+for i in $(seq 1 $RUNS); do
+  if [ $((i % 2)) = 1 ]; then order="off on"; else order="on off"; fi
+  for mode in $order; do
+    set_mode $mode
+    for w in $WORKLOADS; do
+      $BIN/psql $H -d bench -XAqc "CHECKPOINT"
+      tps=$($BIN/pgbench $H $(args_for $w) -c $CLIENTS -j $CLIENTS -T $SECS bench 2>/dev/null \
+            | awk '/^tps/ {print $3; exit}')
+      echo "$w,$mode,$i,$tps" | tee -a $OUT
+    done
+  done
 done
 
-mkdir -p "$(dirname "$0")/results"
-RES="$(dirname "$0")/results/$(date +%Y-%m-%d)-$(hostname -s).md"
+mkdir -p "$OUTDIR"
+RES="$OUTDIR/$(date +%Y-%m-%d)-$LABEL.md"
 {
   echo "# pg_stat_index_queries overhead — $(date -u '+%Y-%m-%d %H:%M UTC')"
   echo
-  echo "- Host: $(hostname -s), $(nproc) vCPU, $(free -g | awk '/Mem/ {print $2}') GB RAM"
-  echo "- CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+  [ -n "$NOTE" ] && { echo "> $NOTE"; echo; }
+  echo "- Machine: $LABEL, $(nproc) vCPU, $(free -g 2>/dev/null | awk '/Mem/ {print $2}') GB RAM"
+  cpu=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || true)
+  [ -z "$cpu" ] && cpu=$(lscpu 2>/dev/null | awk -F: '/Model name/ {print $2; exit}' | xargs || true)
+  [ "$cpu" = "-" ] && cpu=""   # VMs (e.g. Docker Desktop on Apple Silicon) hide the model
+  echo "- CPU: ${cpu:-unknown ($(uname -m)); see note}"
+  echo "- Kernel: $(uname -sr), arch $(uname -m)"
   echo "- PostgreSQL: $($BIN/postgres --version)"
-  echo "- pgbench scale $SCALE, $CLIENTS clients, $RUNS × ${SECS}s per mode"
+  echo "- pgbench scale $SCALE, $CLIENTS clients, $RUNS × ${SECS}s per mode, modes interleaved"
   echo
-  echo "| Workload | Mean TPS off | Mean TPS on | Change |"
-  echo "|---|---|---|---|"
-  for w in $(cut -d, -f1 $OUT | sort -u); do
-    off=$(awk -F, -v w=$w '$1==w && $2=="off" {s+=$4; n++} END {printf "%.0f", s/n}' $OUT)
-    on=$(awk -F, -v w=$w '$1==w && $2=="on" {s+=$4; n++} END {printf "%.0f", s/n}' $OUT)
+  echo "| Workload | Mean TPS off | Mean TPS on | Change | Spread off | Spread on |"
+  echo "|---|---|---|---|---|---|"
+  for w in $WORKLOADS; do
+    # spread = (max - min) / mean across runs of one mode: the noise floor.
+    stats() { awk -F, -v w=$w -v m=$1 '$1==w && $2==m {s+=$4; n++; if (n==1||$4<lo) lo=$4; if (n==1||$4>hi) hi=$4}
+      END {printf "%.0f %.2f\n", s/n, (hi-lo)/(s/n)*100}' $OUT; }
+    read off soff < <(stats off); read on son < <(stats on)
     chg=$(awk -v a=$off -v b=$on 'BEGIN {printf "%+.2f%%", (b-a)/a*100}')
-    echo "| $w | $off | $on | $chg |"
+    echo "| $w | $off | $on | $chg | ${soff}% | ${son}% |"
   done
+  echo
+  echo "A change smaller than the spread is noise."
   echo
   echo "Raw runs (workload, mode, run, tps):"
   echo '```'; cat $OUT; echo '```'

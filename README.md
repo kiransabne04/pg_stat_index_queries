@@ -122,6 +122,15 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 - SQL edition only sees queries whose plans were captured, and loses ones evicted from pg_stat_statements.
 - Drop-impact uses generic-plan cost estimates, not measured latency.
 
+## Related work
+
+- [pg_stat_statements](https://www.postgresql.org/docs/current/pgstatstatements.html): per-query stats, no index information
+- [pg_qualstats](https://github.com/powa-team/pg_qualstats): predicates used, not the index the planner chose
+- [pg_stat_plans](https://github.com/pganalyze/pg_stat_plans): plans per query; the SQL edition reads it
+- [HypoPG](https://github.com/HypoPG/hypopg): hypothetical and hidden indexes; used by `index_drop_impact()`
+- [pg_ash](https://github.com/NikolayS/pg_ash), [pgsentinel](https://github.com/pgsentinel/pgsentinel): active session history (what sessions were waiting on); a different, complementary question
+- pg_regression_watch (sister project): which query regressed, when and why
+
 ## License
 
 PostgreSQL License. See [LICENSE](LICENSE).

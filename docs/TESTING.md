@@ -63,6 +63,7 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 | Native build + regression + TAP on macOS arm64, Homebrew PG 17.11 (clang 21, `-Werror`) | Pass |
 | GitHub Actions CI workflow | **Not yet run** on GitHub |
 | `aurora_stat_plans` adapter | **Not yet run on Aurora**: column names taken from AWS docs |
+| `sql_edition/validation/managed_check.sql` (T05 script) | Dry-run on PG 17 playground: self-hosted path and RDS path (`-v simulate_rds=1`). Aurora/RDS runs pending, see [AURORA-VALIDATION.md](AURORA-VALIDATION.md) |
 | `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk |
 | Drop-impact fallback with no plan source (RDS-like) | Verified: candidates from query text, index use before/after correct |
 | Docker image (test runner + playground) | Built and run on macOS arm64, PG 15–18 |

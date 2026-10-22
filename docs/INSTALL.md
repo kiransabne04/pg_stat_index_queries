@@ -72,7 +72,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
 4. Grant read access to whoever investigates: `GRANT pg_read_all_stats TO analyst;` (to see all statements and plans).
 5. Check: `SELECT index_deps.resolved_plan_source();` should return `aurora_stat_plans`.
 
-> The Aurora path has **not yet been run against a live cluster** (see `docs/TESTING.md`). If `index_deps.plan_source()` errors on column names, compare with `SELECT * FROM aurora_stat_plans(true) LIMIT 1` and fix the adapter; task `codex/tasks/T05-aurora-validation.md` covers this.
+> The Aurora path has **not yet been run against a live cluster** (see `docs/TESTING.md`). If `index_deps.plan_source()` errors on column names, compare with `SELECT * FROM aurora_stat_plans(true) LIMIT 1` and fix the adapter; task `codex/tasks/T05-aurora-validation.md` covers this. Step-by-step validation run: [AURORA-VALIDATION.md](AURORA-VALIDATION.md).
 
 ## 4. Amazon RDS for PostgreSQL
 

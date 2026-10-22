@@ -5,7 +5,7 @@
 | Command | What it covers |
 |---|---|
 | `make installcheck` | `sql/basic.sql`: index scan, index-only, bitmap, planned-not-executed, prepared statements, nesting (top vs all), helper views, catalog filter, reset · `sql/partitions.sql`: partition roll-up · `sql/upgrade.sql`: 0.1 → 0.2 · `t/001_persistence.pl`: survives clean restart, `save = off`, corrupt file ignored and reported, **real crash** (process killed) doesn't reload stale counters · `t/002_eviction.pl`: `max = 100` with 150 indexes, dealloc counted, newest kept |
-| `make -C sql_edition installcheck` | `parse`: fixture plans incl. Backward, Index Only, BitmapOr, quoted names, same-name index in two schemas (ambiguous) · `dependents`: live pg_stat_plans · `drop_impact`: cost/plan change, index never left hidden, broken query skipped cleanly, DML skipped, error on non-index |
+| `make -C sql_edition installcheck` | `parse`: fixture plans incl. Backward, Index Only, BitmapOr, quoted names, same-name index in two schemas (ambiguous) · `dependents`: live pg_stat_plans · `drop_impact`: cost/plan change, index never left hidden, broken query skipped cleanly, DML skipped, error on non-index, typed literals (`interval $1`) and `PREPARE` texts rewritten so they can be EXPLAINed · `upgrade`: 0.1 → 0.2 |
 | `./bench/run.sh` | pgbench overhead with/without the extension |
 
 All suites start their own temporary server, so they don't touch any existing cluster. Run them as a non-root user. The regression instances run with `--no-locale` (`NO_LOCALE = 1` in both Makefiles) so `ORDER BY` on names sorts the same on every machine.
@@ -64,7 +64,7 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 | CI workflow, all 7 jobs (native 15–18, sql-edition 16–18) | Pass locally via `scripts/ci-local.sh` (ubuntu:24.04, linux/amd64, PGDG). **Not yet run on GitHub** |
 | `aurora_stat_plans` adapter | **Not yet run on Aurora**: column names taken from AWS docs |
 | `sql_edition/validation/managed_check.sql` (T05 script) | Dry-run on PG 17 playground: self-hosted path and RDS path (`-v simulate_rds=1`). Aurora/RDS runs pending, see [AURORA-VALIDATION.md](AURORA-VALIDATION.md) |
-| `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk |
+| `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk. 0.2 (22 Oct, pg_tle 6340fd2, PG 16): fresh install; upgrade of a 0.1 pg_tle install via the new file + `ALTER EXTENSION UPDATE` (config kept); file rerun is harmless |
 | Drop-impact fallback with no plan source (RDS-like) | Verified: candidates from query text, index use before/after correct |
 | Docker image (test runner + playground) | Built and run on macOS arm64, PG 15–18 |
 

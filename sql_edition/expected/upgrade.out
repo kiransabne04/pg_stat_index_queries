@@ -37,3 +37,10 @@ SELECT count(*) AS listed FROM index_deps.index_no_dependents WHERE tablename = 
       0
 (1 row)
 
+-- 0.2 adds the query rewriter used by index_drop_impact.
+SELECT index_deps.explainable_query('SELECT interval $1') AS explained;
+      explained      
+---------------------
+ SELECT $1::interval
+(1 row)
+

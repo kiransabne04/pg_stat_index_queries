@@ -48,6 +48,8 @@ index_drop_impact()  candidates: native extension > captured plans > statements 
                      for each: EXPLAIN (GENERIC_PLAN, FORMAT JSON) -> hypopg_hide_index -> EXPLAIN -> unhide
 ```
 
+Query text comes from pg_stat_statements, which isn't always valid SQL: typed literals are normalized to `interval $4` and prepared statements are stored as `PREPARE name(types) AS …`. `index_deps.explainable_query()` rewrites both (`$4::interval`; inner query with `$n::declared_type`) before EXPLAIN; the `query` column still shows the original text.
+
 Safety of `index_drop_impact`:
 - HypoPG's hidden-index list lives in backend memory, not in the transaction, so every error path calls `hypopg_unhide_index` explicitly; tests check `hypopg_hidden_indexes()` is empty afterwards.
 - Per-query `statement_timeout` (default 2 s); non-read statements skipped unless `p_include_dml`.

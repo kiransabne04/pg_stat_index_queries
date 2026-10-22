@@ -69,6 +69,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
    \i sql_edition/install_pg_tle.sql
    CREATE EXTENSION pg_index_deps;
    ```
+   To upgrade a pg_tle install later, run the newer `install_pg_tle.sql` (it registers the missing update paths and the new default version) and then `ALTER EXTENSION pg_index_deps UPDATE;`.
 4. Grant read access to whoever investigates: `GRANT pg_read_all_stats TO analyst;` (to see all statements and plans).
 5. Check: `SELECT index_deps.resolved_plan_source();` should return `aurora_stat_plans`.
 

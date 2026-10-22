@@ -56,4 +56,58 @@ SELECT note FROM index_deps.index_drop_impact('o_c_idx') WHERE query LIKE 'UPDAT
 -- Errors
 SELECT index_deps.index_drop_impact('o'::regclass);
 ERROR:  o is not an index
-CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer) line 29 at RAISE
+CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer) line 30 at RAISE
+-- Query text EXPLAIN can't take as is: typed literals and PREPARE.
+SELECT q AS input, index_deps.explainable_query(q) AS explained
+  FROM unnest(ARRAY[
+    'SELECT * FROM t WHERE ts >= timestamptz $1 - $2 * interval $3',
+    'SELECT timestamp with time zone $1, double precision $2, character varying $3',
+    'SELECT * FROM t WHERE a BETWEEN $1 AND $2 LIMIT $3',
+    'SELECT $1 AT TIME ZONE $2',
+    'SELECT a FROM t WHERE b LIKE $1 ESCAPE $2',
+    'PREPARE p(int, numeric(10,2)) AS SELECT $1 + $2, $10',
+    'prepare "Q"  as select 1',
+    'SELECT 1'
+  ]) AS q;
+                                     input                                     |                                    explained                                     
+-------------------------------------------------------------------------------+----------------------------------------------------------------------------------
+ SELECT * FROM t WHERE ts >= timestamptz $1 - $2 * interval $3                 | SELECT * FROM t WHERE ts >= $1::timestamptz - $2 * $3::interval
+ SELECT timestamp with time zone $1, double precision $2, character varying $3 | SELECT $1::timestamp with time zone, $2::double precision, $3::character varying
+ SELECT * FROM t WHERE a BETWEEN $1 AND $2 LIMIT $3                            | SELECT * FROM t WHERE a BETWEEN $1 AND $2 LIMIT $3
+ SELECT $1 AT TIME ZONE $2                                                     | SELECT $1 AT TIME ZONE $2
+ SELECT a FROM t WHERE b LIKE $1 ESCAPE $2                                     | SELECT a FROM t WHERE b LIKE $1 ESCAPE $2
+ PREPARE p(int, numeric(10,2)) AS SELECT $1 + $2, $10                          | SELECT $1::int + $2::numeric(10,2), $10
+ prepare "Q"  as select 1                                                      | select 1
+ SELECT 1                                                                      | SELECT 1
+(8 rows)
+
+SELECT count(*) FROM o WHERE c = 8 AND now() - interval '1 day' < now();
+ count 
+-------
+   100
+(1 row)
+
+PREPARE q8(int) AS SELECT count(*) FROM o WHERE c = $1;
+EXECUTE q8(3);
+ count 
+-------
+   100
+(1 row)
+
+DEALLOCATE q8;
+SELECT left(query, 40) AS query, note, uses_index_now, uses_index_after
+  FROM index_deps.index_drop_impact('o_c_idx')
+ WHERE query LIKE '%interval%' OR query LIKE 'PREPARE q8%'
+ ORDER BY query;
+                  query                   |              note              | uses_index_now | uses_index_after 
+------------------------------------------+--------------------------------+----------------+------------------
+ PREPARE q8(int) AS SELECT count(*) FROM  | candidates from captured plans | t              | f
+ SELECT count(*) FROM o WHERE c = $1 AND  | candidates from captured plans | t              | f
+(2 rows)
+
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+ still_hidden 
+--------------
+            0
+(1 row)
+

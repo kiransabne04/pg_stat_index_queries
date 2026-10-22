@@ -26,3 +26,26 @@ SELECT note FROM index_deps.index_drop_impact('o_c_idx') WHERE query LIKE 'UPDAT
 
 -- Errors
 SELECT index_deps.index_drop_impact('o'::regclass);
+
+-- Query text EXPLAIN can't take as is: typed literals and PREPARE.
+SELECT q AS input, index_deps.explainable_query(q) AS explained
+  FROM unnest(ARRAY[
+    'SELECT * FROM t WHERE ts >= timestamptz $1 - $2 * interval $3',
+    'SELECT timestamp with time zone $1, double precision $2, character varying $3',
+    'SELECT * FROM t WHERE a BETWEEN $1 AND $2 LIMIT $3',
+    'SELECT $1 AT TIME ZONE $2',
+    'SELECT a FROM t WHERE b LIKE $1 ESCAPE $2',
+    'PREPARE p(int, numeric(10,2)) AS SELECT $1 + $2, $10',
+    'prepare "Q"  as select 1',
+    'SELECT 1'
+  ]) AS q;
+
+SELECT count(*) FROM o WHERE c = 8 AND now() - interval '1 day' < now();
+PREPARE q8(int) AS SELECT count(*) FROM o WHERE c = $1;
+EXECUTE q8(3);
+DEALLOCATE q8;
+SELECT left(query, 40) AS query, note, uses_index_now, uses_index_after
+  FROM index_deps.index_drop_impact('o_c_idx')
+ WHERE query LIKE '%interval%' OR query LIKE 'PREPARE q8%'
+ ORDER BY query;
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();

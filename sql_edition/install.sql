@@ -206,6 +206,75 @@ AS $$
      WHERE jsonb_typeof(v) = 'object' AND v ? 'Node Type'
 $$;
 
+-- Turn a pg_stat_statements query text into something EXPLAIN accepts:
+--  - PREPARE name(types) AS <query>: keep <query>, cast $n to the declared
+--    types.
+--  - Typed literals: pg_stat_statements turns interval '1 day' into
+--    interval $4, which doesn't parse; rewrite it as $4::interval. Only a
+--    word that names a type (and isn't a reserved keyword such as AND) is
+--    rewritten.
+CREATE FUNCTION index_deps.explainable_query(p_query text)
+RETURNS text
+LANGUAGE plpgsql STABLE STRICT
+AS $$
+DECLARE
+    q      text := p_query;
+    m      text[];
+    types  text[] := '{}';
+    cur    text := '';
+    depth  int := 0;
+    ch     text;
+    w      text;
+    i      int;
+BEGIN
+    m := regexp_match(q, '^\s*PREPARE\s+(?:"(?:[^"]|"")+"|[[:alnum:]_]+)\s*(?:\(((?:[^()]|\([^()]*\))*)\))?\s+AS\s+(.*)$', 'is');
+    IF m IS NOT NULL THEN
+        q := m[2];
+        -- Split the declared types on top-level commas (numeric(10,2) is one type).
+        IF m[1] IS NOT NULL THEN
+            FOR i IN 1 .. length(m[1]) LOOP
+                ch := substr(m[1], i, 1);
+                IF ch = '(' THEN depth := depth + 1;
+                ELSIF ch = ')' THEN depth := depth - 1;
+                END IF;
+                IF ch = ',' AND depth = 0 THEN
+                    types := types || btrim(cur);
+                    cur := '';
+                ELSE
+                    cur := cur || ch;
+                END IF;
+            END LOOP;
+            types := types || btrim(cur);
+        END IF;
+    END IF;
+
+    -- Multi-word type names first, then single words.
+    q := regexp_replace(q, '\m(timestamp|time)\s+(with|without)\s+time\s+zone\s+\$([0-9]+)',
+                        '$\3::\1 \2 time zone', 'gi');
+    q := regexp_replace(q, '\m(double)\s+precision\s+\$([0-9]+)', '$\2::double precision', 'gi');
+    q := regexp_replace(q, '\m(character|bit)\s+varying\s+\$([0-9]+)', '$\2::\1 varying', 'gi');
+    FOR w IN SELECT DISTINCT lower(x[1])
+               FROM regexp_matches(q, '\m([[:alpha:]_][[:alnum:]_]*)\s+\$[0-9]+', 'g') AS x
+    LOOP
+        CONTINUE WHEN EXISTS (SELECT 1 FROM pg_get_keywords() k
+                               WHERE k.word = w AND k.catcode IN ('R', 'T'));
+        BEGIN
+            CONTINUE WHEN to_regtype(w) IS NULL;
+        EXCEPTION WHEN OTHERS THEN
+            CONTINUE;
+        END;
+        q := regexp_replace(q, '\m' || w || '\s+\$([0-9]+)', '$\1::' || w, 'gi');
+    END LOOP;
+
+    -- Declared PREPARE types last, so $1::declared binds to the parameter.
+    FOR i IN 1 .. coalesce(array_length(types, 1), 0) LOOP
+        CONTINUE WHEN types[i] = '';
+        q := regexp_replace(q, '\$' || i || '(?![0-9])', '$' || i || '::' || types[i], 'g');
+    END LOOP;
+    RETURN q;
+END;
+$$;
+
 CREATE FUNCTION index_deps.index_drop_impact(
     p_index         regclass,
     p_include_dml   boolean DEFAULT false,
@@ -235,6 +304,7 @@ DECLARE
     r              record;
     j_with         jsonb;
     j_without      jsonb;
+    v_sql          text;
 BEGIN
     IF current_setting('server_version_num')::int < 160000 THEN
         RAISE EXCEPTION 'index_drop_impact needs PostgreSQL 16 or later (EXPLAIN GENERIC_PLAN)';
@@ -313,8 +383,10 @@ BEGIN
         shape_with := NULL; shape_without := NULL;
         note := 'candidates from ' || v_source;
 
-        IF r.query !~* '^\s*(select|with|values|table)\M'
-           AND NOT (p_include_dml AND r.query ~* '^\s*(insert|update|delete|merge)\M') THEN
+        v_sql := index_deps.explainable_query(r.query);
+
+        IF v_sql !~* '^\s*(select|with|values|table)\M'
+           AND NOT (p_include_dml AND v_sql ~* '^\s*(insert|update|delete|merge)\M') THEN
             note := 'skipped: not a read query (set p_include_dml => true to EXPLAIN DML)';
             RETURN NEXT;
             CONTINUE;
@@ -323,12 +395,12 @@ BEGIN
         BEGIN
             PERFORM set_config('statement_timeout', p_timeout_ms::text, true);
 
-            EXECUTE 'EXPLAIN (GENERIC_PLAN, FORMAT JSON) ' || r.query INTO j_with;
+            EXECUTE 'EXPLAIN (GENERIC_PLAN, FORMAT JSON) ' || v_sql INTO j_with;
 
             PERFORM hypopg_hide_index(p_index::oid);
             v_hidden := true;
 
-            EXECUTE 'EXPLAIN (GENERIC_PLAN, FORMAT JSON) ' || r.query INTO j_without;
+            EXECUTE 'EXPLAIN (GENERIC_PLAN, FORMAT JSON) ' || v_sql INTO j_without;
 
             PERFORM hypopg_unhide_index(p_index::oid);
             v_hidden := false;

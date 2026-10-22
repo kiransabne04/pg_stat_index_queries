@@ -18,14 +18,9 @@ install.sql: pg_index_deps--0.2.sql
 	  echo 'SET search_path = index_deps, public;'; \
 	  grep -v '^\\echo' pg_index_deps--0.2.sql | grep -v 'pg_extension_config_dump'; } > $@
 
-# pg_tle install for RDS / Aurora (needs the pg_tle extension).
-install_pg_tle.sql: pg_index_deps--0.2.sql
-	{ echo '-- pg_index_deps 0.2 via pg_tle (generated, do not edit)'; \
-	  echo "SELECT pgtle.install_extension('pg_index_deps', '0.2',"; \
-	  echo "  'which queries depend on each index; drop-impact check',"; \
-	  echo '$$_pgtle_$$'; \
-	  echo 'CREATE SCHEMA IF NOT EXISTS index_deps;'; \
-	  grep -v '^\\echo' pg_index_deps--0.2.sql; \
-	  echo '$$_pgtle_$$);'; } > $@
+# pg_tle install for RDS / Aurora (needs the pg_tle extension). Also upgrades
+# an older pg_tle registration: see gen_pg_tle.sh.
+install_pg_tle.sql: pg_index_deps--0.2.sql $(wildcard pg_index_deps--*--*.sql) gen_pg_tle.sh
+	./gen_pg_tle.sh 0.2 > $@
 
 managed: install.sql install_pg_tle.sql

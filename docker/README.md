@@ -41,4 +41,12 @@ docker compose -f docker/docker-compose.yml up -d --build db
 docker compose -f docker/docker-compose.yml exec db psql -U postgres
 ```
 
+## Smoke test in the playground
+
+`examples/playground.sql` builds a synthetic `orders` schema (100k rows, a monthly-partitioned copy), runs a mixed workload and prints the dependency views and two drop-impact checks. It drops and recreates schema `playground` and resets the statistics, so it can be rerun.
+
+```bash
+docker compose -f docker/docker-compose.yml exec -T db psql -U postgres -X -f - < examples/playground.sql
+```
+
 `.dockerignore` keeps host build artifacts (`*.o`, `*.dylib`, `tmp_check/`, …) out of the image, so building natively on the host and in Docker don't interfere.

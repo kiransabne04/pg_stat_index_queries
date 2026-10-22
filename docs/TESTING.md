@@ -61,7 +61,7 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 | Native build (`COPT=-Werror`) + regression + TAP, PG 15.19, 16.15, 17.11, 18.6 | Pass (Docker, Debian PGDG images, arm64) |
 | SQL edition tests, PG 16, 17, 18 (pg_stat_plans 2.1 + HypoPG 1.4.3) | Pass (Docker, arm64). PG 15 skipped by design |
 | Native build + regression + TAP on macOS arm64, Homebrew PG 17.11 (clang 21, `-Werror`) | Pass |
-| GitHub Actions CI workflow | **Not yet run** on GitHub |
+| CI workflow, all 7 jobs (native 15–18, sql-edition 16–18) | Pass locally via `scripts/ci-local.sh` (ubuntu:24.04, linux/amd64, PGDG). **Not yet run on GitHub** |
 | `aurora_stat_plans` adapter | **Not yet run on Aurora**: column names taken from AWS docs |
 | `sql_edition/validation/managed_check.sql` (T05 script) | Dry-run on PG 17 playground: self-hosted path and RDS path (`-v simulate_rds=1`). Aurora/RDS runs pending, see [AURORA-VALIDATION.md](AURORA-VALIDATION.md) |
 | `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk |

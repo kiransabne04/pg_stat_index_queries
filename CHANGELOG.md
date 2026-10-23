@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4 (2026-10-23): native 0.4, SQL edition pg_index_deps 0.3
+- **New (0.4):** `pg_index_query_stats` view: each (index, query) with what a developer needs to debug it: index definition, size, unique/partial, calls through the index, `pct_calls_using_index`, `other_indexes` the query used, and the query's pg_stat_statements statistics (exec and plan times, rows per call, buffers and cache hit %, temp blocks, I/O time, WAL bytes, roles, query text). pg_stat_statements is looked up when queried, not at install time. Upgrade script 0.3 → 0.4.
+- **New (SQL edition 0.3):** `index_deps.index_query_stats`, the same over captured plans, plus scan types and plan source. Upgrade script 0.2 → 0.3; installers regenerated.
+- Native regression instance now preloads pg_stat_statements (`test/pg.conf`).
+- `examples/playground.sql` shows both new views.
+
 ## 0.3 (2026-10-23): native 0.3, SQL edition pg_index_deps 0.2
 - **Fix (0.3):** `pg_index_no_dependents` listed a partitioned (parent) index as unused even when its partition indexes were used, so it looked safe to drop. Now a parent index counts as used if any index in its partition tree was used, its size is the whole tree, and attached partition indexes aren't listed separately.
 - **Fix (SQL edition 0.2):** `index_drop_impact` skipped queries with typed literals (`interval '1 day'` is stored by pg_stat_statements as `interval $4`, a syntax error) and prepared statements (stored as `PREPARE … AS …`, reported as "not a read query"). New `index_deps.explainable_query()` rewrites both before EXPLAIN.

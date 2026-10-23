@@ -12,3 +12,4 @@
 | 2026-10-21 | Same index name in two schemas is flagged `ambiguous`, not guessed | EXPLAIN text has no schema; a wrong guess is worse than a flag |
 | 2026-10-22 | "No dependents" views report partitioned tables at the parent-index level; attached partition indexes aren't listed on their own | Dropping the parent drops every partition index, so the parent must count as used when any partition index is; an attached partition index can't be dropped by itself, so listing it is noise |
 | 2026-10-22 | SQL edition `index_no_dependents` returns nothing when plan_source = none | With no plan source nothing is known about any index; listing all of them read as "all safe to drop" |
+| 2026-10-23 | `pg_index_query_stats` / `index_query_stats` find pg_stat_statements at query time (PL/pgSQL + dynamic SQL), not as a view dependency | Installs without pg_stat_statements, doesn't block dropping or moving it, and one text works across the PG 17 column rename |

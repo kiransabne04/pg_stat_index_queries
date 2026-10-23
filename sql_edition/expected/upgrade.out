@@ -44,3 +44,23 @@ SELECT index_deps.explainable_query('SELECT interval $1') AS explained;
  SELECT $1::interval
 (1 row)
 
+-- 0.2 -> 0.3: index_query_stats added.
+SELECT to_regclass('index_deps.index_query_stats') IS NULL AS query_stats_absent_in_0_2;
+ query_stats_absent_in_0_2 
+---------------------------
+ t
+(1 row)
+
+ALTER EXTENSION pg_index_deps UPDATE TO '0.3';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
+ extversion 
+------------
+ 0.3
+(1 row)
+
+SELECT to_regclass('index_deps.index_query_stats') IS NOT NULL AS query_stats_present_in_0_3;
+ query_stats_present_in_0_3 
+----------------------------
+ t
+(1 row)
+

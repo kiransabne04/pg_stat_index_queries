@@ -1,0 +1,48 @@
+-- index_query_stats: captured-plan dependencies with the query's
+-- pg_stat_statements statistics. Times, buffers and pg_stat_plans call
+-- counts vary between runs, so they are checked as booleans.
+SET enable_seqscan = off;
+SELECT count(*) FROM o x JOIN o y ON y.id = x.c WHERE x.c = 23;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM o x JOIN o y ON y.id = x.c WHERE x.c = 24;
+ count 
+-------
+   100
+(1 row)
+
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+RESET enable_seqscan;
+-- The join's plan used two indexes: each row names the other one.
+SELECT indexname, scan_types, source, other_indexes, is_unique, is_partial,
+       index_plans >= 1 AND index_calls >= 1 AS counted,
+       calls = 2 AS calls_ok, rows_per_call,
+       total_exec_ms >= 0 AND mean_exec_ms >= 0 AND max_exec_ms >= min_exec_ms AS has_times,
+       shared_blks_hit + shared_blks_read > 0 AS has_buffers,
+       roles = ARRAY[current_user]::name[] AS roles_ok,
+       indexdef, query
+  FROM index_deps.index_query_stats
+ WHERE query LIKE '%JOIN o y%'
+ ORDER BY indexname;
+ indexname | scan_types |    source     | other_indexes | is_unique | is_partial | counted | calls_ok | rows_per_call | has_times | has_buffers | roles_ok |                        indexdef                         |                             query                              
+-----------+------------+---------------+---------------+-----------+------------+---------+----------+---------------+-----------+-------------+----------+---------------------------------------------------------+----------------------------------------------------------------
+ o_c_idx   | index_only | pg_stat_plans | {o_pkey}      | f         | f          | t       | t        |          1.00 | t         | t           | t        | CREATE INDEX o_c_idx ON public.o USING btree (c)        | SELECT count(*) FROM o x JOIN o y ON y.id = x.c WHERE x.c = $1
+ o_pkey    | index_only | pg_stat_plans | {o_c_idx}     | t         | f          | t       | t        |          1.00 | t         | t           | t        | CREATE UNIQUE INDEX o_pkey ON public.o USING btree (id) | SELECT count(*) FROM o x JOIN o y ON y.id = x.c WHERE x.c = $1
+(2 rows)
+
+-- Not an install-time dependency: pg_stat_statements can be dropped, and
+-- the view then says what is missing.
+DROP EXTENSION pg_stat_statements;
+SELECT count(*) FROM index_deps.index_query_stats;
+ERROR:  index_query_stats needs pg_stat_statements
+HINT:  CREATE EXTENSION pg_stat_statements; (on RDS/Aurora it is preloaded by default)
+CONTEXT:  PL/pgSQL function index_deps.index_query_stats() line 10 at RAISE
+CREATE EXTENSION pg_stat_statements;

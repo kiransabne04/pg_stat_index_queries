@@ -10,3 +10,8 @@ ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.3';
 SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
 SELECT pg_get_viewdef('pg_index_no_dependents'::regclass) LIKE '%pg_partition_root%'
        AS no_dependents_is_partition_aware;
+-- 0.3 -> 0.4: pg_index_query_stats added.
+SELECT to_regclass('pg_index_query_stats') IS NULL AS query_stats_absent_in_0_3;
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.4';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+SELECT to_regclass('pg_index_query_stats') IS NOT NULL AS query_stats_present_in_0_4;

@@ -135,6 +135,17 @@ SELECT d.tablename, d.indexname, d.queryid, d.toplevel,
  ORDER BY d.indexname, d.calls_executed DESC;
 
 \echo
+\echo '=== pg_index_query_stats (native): each (index, query) with pg_stat_statements stats, slowest first'
+SELECT indexname, index_calls_executed AS idx_calls, pct_calls_using_index AS pct,
+       other_indexes, calls, round(mean_exec_ms::numeric, 3) AS mean_ms,
+       round(total_exec_ms::numeric, 1) AS total_ms, rows_per_call,
+       shared_blks_hit AS hit, shared_blks_read AS read, cache_hit_pct AS hit_pct,
+       left(regexp_replace(query, '\s+', ' ', 'g'), 50) AS query
+  FROM pg_index_query_stats
+ WHERE schemaname = 'playground' AND tablename = 'orders'
+ ORDER BY total_exec_ms DESC NULLS LAST;
+
+\echo
 \echo '=== pg_index_no_dependents (native): no executed use since tracked_since'
 SELECT tablename, indexname, pg_size_pretty(index_bytes) AS size, tracked_since
   FROM pg_index_no_dependents
@@ -170,6 +181,15 @@ SELECT tablename, indexname, count(*) AS queries, sum(calls) AS calls,
  WHERE schemaname = 'playground' AND tablename = 'orders'
  GROUP BY 1, 2
  ORDER BY 1, 2;
+
+\echo
+\echo '=== index_deps.index_query_stats (SQL edition): same, from captured plans'
+SELECT indexname, scan_types, index_calls AS idx_calls, other_indexes, calls,
+       round(mean_exec_ms::numeric, 3) AS mean_ms, rows_per_call, cache_hit_pct AS hit_pct,
+       left(regexp_replace(query, '\s+', ' ', 'g'), 50) AS query
+  FROM index_deps.index_query_stats
+ WHERE schemaname = 'playground' AND tablename = 'orders'
+ ORDER BY total_exec_ms DESC NULLS LAST;
 
 \echo
 \echo '=== index_deps.index_drop_impact: used index (orders_customer_idx)'

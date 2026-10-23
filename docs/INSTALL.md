@@ -30,6 +30,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.2 → 0.3:** install the new build, then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.3';`. Only the `pg_index_no_dependents` view changes, so no restart is needed.
 
+**Upgrading 0.3 → 0.4:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.4';` (adds `pg_index_query_stats`; SQL only, no restart). The view needs pg_stat_statements when you query it.
+
 ## 2. Self-hosted, SQL edition (optional)
 
 Needs pg_stat_plans (PG 16+) for plan capture and HypoPG for the drop-impact check.
@@ -72,6 +74,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
    CREATE EXTENSION pg_index_deps;
    ```
    To upgrade a pg_tle install later, run the newer `install_pg_tle.sql` (it registers the missing update paths and the new default version) and then `ALTER EXTENSION pg_index_deps UPDATE;`.
+   The plain install has no upgrade path: `DROP SCHEMA index_deps CASCADE;`, run the newer `install.sql`, and set `plan_source` again if you had changed it.
 4. Grant read access to whoever investigates: `GRANT pg_read_all_stats TO analyst;` (to see all statements and plans).
 5. Check: `SELECT index_deps.resolved_plan_source();` should return `aurora_stat_plans`.
 
@@ -79,7 +82,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
 
 ## 4. Amazon RDS for PostgreSQL
 
-RDS has no per-plan source, so the dependency views are empty there (since SQL edition 0.2 that includes `index_no_dependents`; 0.1 listed every index there, so upgrade before relying on it). The **drop-impact check still works** (PG 16+): with no captured plans it falls back to every statement in pg_stat_statements that mentions the index's table.
+RDS has no per-plan source, so the dependency views are empty there (since SQL edition 0.2 that includes `index_no_dependents`; 0.1 listed every index there, so upgrade before relying on it). The **drop-impact check still works** (PG 16+): with no captured plans it falls back to every statement in pg_stat_statements that mentions the index's table. `index_query_stats` is empty there too, since it is built on the dependency view.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;

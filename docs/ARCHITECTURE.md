@@ -35,6 +35,7 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 ### SQL objects
 - `pg_stat_index_queries()` set-returning function (materialized SRF) and view.
 - Helper views join `pg_class` / `pg_index` for names; `pg_index_dependents_rollup` maps child indexes to their partitioned parent with `pg_partition_root()` and reports `calls_executed` as the max per partition (lower bound on statements) and `partition_scans_executed` as the sum. `pg_index_no_dependents` (0.3) uses the same mapping: a partitioned index is used if any index in its tree is, and attached partition indexes aren't listed on their own.
+- `pg_index_query_stats` (0.4) is a view over a PL/pgSQL function that joins `pg_index_dependents` to pg_stat_statements on (queryid, toplevel), summing over roles. It finds pg_stat_statements through `pg_extension` when called, so there is no install-time dependency and dropping pg_stat_statements isn't blocked; without it the view raises an error with a hint. `blk_read_time`/`blk_write_time` were renamed `shared_blk_*_time` in PG 17, so those two are read through `to_jsonb(row)` and one query text works on 15–18. The SQL edition's `index_deps.index_query_stats` (0.3) does the same over `index_deps.index_dependents`, joined on queryid only.
 
 ## SQL edition (`sql_edition/pg_index_deps--0.1.sql`)
 

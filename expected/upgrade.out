@@ -35,3 +35,23 @@ SELECT pg_get_viewdef('pg_index_no_dependents'::regclass) LIKE '%pg_partition_ro
  t
 (1 row)
 
+-- 0.3 -> 0.4: pg_index_query_stats added.
+SELECT to_regclass('pg_index_query_stats') IS NULL AS query_stats_absent_in_0_3;
+ query_stats_absent_in_0_3 
+---------------------------
+ t
+(1 row)
+
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.4';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+ extversion 
+------------
+ 0.4
+(1 row)
+
+SELECT to_regclass('pg_index_query_stats') IS NOT NULL AS query_stats_present_in_0_4;
+ query_stats_present_in_0_4 
+----------------------------
+ t
+(1 row)
+

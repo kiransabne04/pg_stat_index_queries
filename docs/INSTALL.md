@@ -28,6 +28,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.1 → 0.2:** install the new build, restart, then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.2';`.
 
+**Upgrading 0.2 → 0.3:** install the new build, then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.3';`. Only the `pg_index_no_dependents` view changes, so no restart is needed.
+
 ## 2. Self-hosted, SQL edition (optional)
 
 Needs pg_stat_plans (PG 16+) for plan capture and HypoPG for the drop-impact check.

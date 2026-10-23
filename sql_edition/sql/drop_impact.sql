@@ -75,3 +75,20 @@ SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
  WHERE query LIKE '%FROM pi%'
  ORDER BY query;
 SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+
+-- No plan source (RDS): candidates are statements whose text mentions the
+-- table, so nothing says the index was used. A partial index with a constant
+-- in its predicate is unknown for every query the generic plan doesn't use
+-- it for (including ones that never needed it: safe, not precise). A
+-- constant-free predicate isn't affected by $n, so "unchanged" stands.
+UPDATE index_deps.config SET value = 'none' WHERE key = 'plan_source';
+SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
+  FROM index_deps.index_drop_impact('pi_open_idx')
+ WHERE query LIKE 'SELECT count(*) FROM pi%'
+ ORDER BY query;
+SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
+  FROM index_deps.index_drop_impact('pi_live_idx')
+ WHERE query LIKE 'SELECT count(*) FROM pi%'
+ ORDER BY query;
+UPDATE index_deps.config SET value = 'auto' WHERE key = 'plan_source';
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();

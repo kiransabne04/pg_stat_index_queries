@@ -56,7 +56,7 @@ SELECT note FROM index_deps.index_drop_impact('o_c_idx') WHERE query LIKE 'UPDAT
 -- Errors
 SELECT index_deps.index_drop_impact('o'::regclass);
 ERROR:  o is not an index
-CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer) line 32 at RAISE
+CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer) line 37 at RAISE
 -- Query text EXPLAIN can't take as is: typed literals and PREPARE.
 SELECT q AS input, index_deps.explainable_query(q) AS explained
   FROM unnest(ARRAY[
@@ -155,6 +155,39 @@ SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
  SELECT count(*) FROM pi WHERE deleted_at IS NULL A | t              | t            | candidates from captured plans
 (1 row)
 
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+ still_hidden 
+--------------
+            0
+(1 row)
+
+-- No plan source (RDS): candidates are statements whose text mentions the
+-- table, so nothing says the index was used. A partial index with a constant
+-- in its predicate is unknown for every query the generic plan doesn't use
+-- it for (including ones that never needed it: safe, not precise). A
+-- constant-free predicate isn't affected by $n, so "unchanged" stands.
+UPDATE index_deps.config SET value = 'none' WHERE key = 'plan_source';
+SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
+  FROM index_deps.index_drop_impact('pi_open_idx')
+ WHERE query LIKE 'SELECT count(*) FROM pi%'
+ ORDER BY query;
+                       query                        | uses_index_now | plan_changed |                                                                                                         note                                                                                                         
+----------------------------------------------------+----------------+--------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ SELECT count(*) FROM pi WHERE deleted_at IS NULL A | f              |              | unknown: the generic plan does not use the index; partial index (WHERE (status = 'open'::text)) cannot be matched to $n parameters; check with EXPLAIN using real values (candidates from query text mentions table)
+ SELECT count(*) FROM pi WHERE status = $1 AND k =  | f              |              | unknown: the generic plan does not use the index; partial index (WHERE (status = 'open'::text)) cannot be matched to $n parameters; check with EXPLAIN using real values (candidates from query text mentions table)
+(2 rows)
+
+SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
+  FROM index_deps.index_drop_impact('pi_live_idx')
+ WHERE query LIKE 'SELECT count(*) FROM pi%'
+ ORDER BY query;
+                       query                        | uses_index_now | plan_changed |                   note                    
+----------------------------------------------------+----------------+--------------+-------------------------------------------
+ SELECT count(*) FROM pi WHERE deleted_at IS NULL A | t              | t            | candidates from query text mentions table
+ SELECT count(*) FROM pi WHERE status = $1 AND k =  | f              | f            | candidates from query text mentions table
+(2 rows)
+
+UPDATE index_deps.config SET value = 'auto' WHERE key = 'plan_source';
 SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
  still_hidden 
 --------------

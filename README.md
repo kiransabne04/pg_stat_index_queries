@@ -8,7 +8,7 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.2, experimental.** Tested on PostgreSQL 16. CI is set up for 15–18 but hasn't run yet. Don't rely on it in production until CI is green and you've benchmarked it on your hardware.
+> **Status: 0.3 (SQL edition 0.2), experimental.** Tests pass on PostgreSQL 15–18 (Docker; the CI workflow passes when run locally). Overhead hasn't been benchmarked on a proper machine yet and the Aurora path hasn't run on a live cluster. Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 

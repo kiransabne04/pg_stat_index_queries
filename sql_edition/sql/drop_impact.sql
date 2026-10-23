@@ -49,3 +49,29 @@ SELECT left(query, 40) AS query, note, uses_index_now, uses_index_after
  WHERE query LIKE '%interval%' OR query LIKE 'PREPARE q8%'
  ORDER BY query;
 SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+
+-- Partial indexes. pg_stat_statements replaces constants with $n, so a
+-- generic plan can't prove "status = $1" implies the index predicate
+-- "status = 'open'" and never uses the index. Real executions did, so the
+-- result must be unknown, not "plan unchanged".
+CREATE TABLE pi (id int, k int, status text, deleted_at timestamptz);
+INSERT INTO pi SELECT g, g % 500,
+       CASE WHEN g % 100 = 0 THEN 'open' ELSE 'closed' END,
+       CASE WHEN g % 100 = 0 THEN NULL ELSE now() END
+  FROM generate_series(1, 100000) g;
+CREATE INDEX pi_open_idx ON pi (k) WHERE status = 'open';
+CREATE INDEX pi_live_idx ON pi (id) WHERE deleted_at IS NULL;
+VACUUM ANALYZE pi;
+SELECT count(*) FROM pi WHERE status = 'open' AND k = 100;
+SELECT count(*) FROM pi WHERE deleted_at IS NULL AND id < 5000;
+SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
+  FROM index_deps.index_drop_impact('pi_open_idx')
+ WHERE query LIKE '%FROM pi%'
+ ORDER BY query;
+-- A predicate without constants ("IS NULL") survives normalization, so the
+-- generic plan can use the index and the result is a normal estimate.
+SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
+  FROM index_deps.index_drop_impact('pi_live_idx')
+ WHERE query LIKE '%FROM pi%'
+ ORDER BY query;
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();

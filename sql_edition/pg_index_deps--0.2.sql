@@ -297,6 +297,7 @@ AS $$
 DECLARE
     v_index_name   text;
     v_table_name   text;
+    v_pred         text;
     v_old_timeout  text := current_setting('statement_timeout');
     v_hidden       boolean := false;
     v_source       text;
@@ -316,7 +317,8 @@ BEGIN
         RAISE EXCEPTION 'pg_stat_statements is required (it provides the query text)';
     END IF;
 
-    SELECT ic.relname, tc.relname INTO v_index_name, v_table_name
+    SELECT ic.relname, tc.relname, pg_get_expr(x.indpred, x.indrelid)
+      INTO v_index_name, v_table_name, v_pred
       FROM pg_index x
       JOIN pg_class ic ON ic.oid = x.indexrelid
       JOIN pg_class tc ON tc.oid = x.indrelid
@@ -415,6 +417,24 @@ BEGIN
             shape_with := index_deps.plan_shape(j_with);
             shape_without := index_deps.plan_shape(j_without);
             plan_changed := shape_with IS DISTINCT FROM shape_without;
+
+            -- The generic plan doesn't use the index, but recorded plans of
+            -- this query did, or the index is partial (its predicate can't
+            -- be proven against $n parameters: "status = $1" vs
+            -- "WHERE status = 'open'"). "Unchanged" would understate the
+            -- risk, so report unknown.
+            IF NOT uses_index_now
+               AND (v_source <> 'query text mentions table' OR v_pred IS NOT NULL) THEN
+                plan_changed := NULL;
+                note := 'unknown: the generic plan does not use the index'
+                        || CASE WHEN v_source <> 'query text mentions table'
+                                THEN ' but recorded plans of this query did' ELSE '' END
+                        || CASE WHEN v_pred IS NOT NULL
+                                THEN '; partial index (WHERE ' || v_pred
+                                     || ') cannot be matched to $n parameters' ELSE '' END
+                        || '; check with EXPLAIN using real values ('
+                        || note || ')';
+            END IF;
         EXCEPTION WHEN OTHERS THEN
             -- HypoPG state lives in backend memory, not in the transaction,
             -- so it must be undone here explicitly.

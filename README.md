@@ -120,7 +120,7 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 - Bitmap Index Scans always count as executed (Postgres builds their scan state at startup).
 - Counters are lost on crash (saved only at clean shutdown).
 - SQL edition only sees queries whose plans were captured, and loses ones evicted from pg_stat_statements.
-- Drop-impact uses generic-plan cost estimates, not measured latency.
+- Drop-impact uses generic-plan cost estimates, not measured latency. When the generic plan can't use the index although real plans did (typically a partial index whose predicate has a constant), the row says `unknown:` with `plan_changed` NULL: check that query with EXPLAIN and real values.
 
 ## Related work
 

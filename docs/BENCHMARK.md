@@ -31,6 +31,8 @@ Only numbers from this setup go into README:
 5. If any spread is above 2%, the machine is too noisy: rerun with `--runs 5` or on another instance.
 6. Commit `bench/results/<date>-<label>.md`; put the mean change per workload in README "Overhead".
 
+On AWS, `bench/aws-ec2.sh` does steps 1–6. Default `c7gd.xlarge`: 4 Graviton3 vCPU, non-burstable, local NVMe for the data directory. Run `up`, `push`, `run`, then `fetch` and `down` after about 1.5 hours. It needs a paid-plan account: free-plan accounts can launch only free-tier types (2 vCPU, burstable or flex).
+
 ## Not publishable
 
 Laptops, Docker Desktop (a VM on the host), emulated architectures, and burstable cloud instances. These runs are fine as a sanity check before the real one. Always pass `--note "NOT PUBLISHABLE: <why>"` and a label that says so; don't quote their numbers in README.

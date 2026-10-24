@@ -62,8 +62,10 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 | SQL edition tests, PG 16, 17, 18 (pg_stat_plans 2.1 + HypoPG 1.4.3) | Pass (Docker, arm64). PG 15 skipped by design |
 | Native build + regression + TAP on macOS arm64, Homebrew PG 17.11 (clang 21, `-Werror`) | Pass |
 | CI workflow, all 7 jobs (native 15–18, sql-edition 16–18) | Pass locally via `scripts/ci-local.sh` (ubuntu:24.04, linux/amd64, PGDG), and on GitHub Actions (run 39908116705, 23 Oct 2026, commit 9e6c2ac) |
-| `aurora_stat_plans` adapter | **Not yet run on Aurora**: column names taken from AWS docs |
-| Index lab (`sql_edition/validation/lab/`) | Docker PG 16–18, both modes, 24 Oct 2026: 0 FAIL after SQL edition 0.4 (see below). Aurora/RDS pending |
+| `aurora_stat_plans` adapter | Verified on Aurora PostgreSQL 17.9.5 (24 Oct 2026): column names match; real plan text is in the `parse` test fixture |
+| Aurora PostgreSQL 17.9.5, express configuration (Serverless v2, free-plan account), ap-southeast-2, pg_tle install | Index lab: 115 PASS, 0 FAIL, 4 KNOWN (24 Oct 2026). Report: [validation/2026-10-24-aurora-17.9-express-writer.md](validation/2026-10-24-aurora-17.9-express-writer.md). Reader phase not run: the free plan allows no extra instance |
+| RDS for PostgreSQL 17.11, db.t4g.micro, ap-southeast-2, plain install | Index lab: 33 PASS, 0 FAIL, 2 KNOWN (24 Oct 2026): no plan source, drop-impact fallback. Report: [validation/2026-10-24-rds-17.11.md](validation/2026-10-24-rds-17.11.md) |
+| Index lab (`sql_edition/validation/lab/`) | Docker PG 16–18, both modes, Aurora 17.9 and RDS 17.11, 24 Oct 2026: 0 FAIL after SQL edition 0.4 (see below) |
 | `sql_edition/validation/managed_check.sql` (T05 smoke test) | Dry-run on PG 17 playground: self-hosted path and RDS path (`-v simulate_rds=1`). Aurora/RDS runs pending, see [AURORA-VALIDATION.md](AURORA-VALIDATION.md) |
 | `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk. 0.2 (22 Oct, pg_tle 6340fd2, PG 16): fresh install; upgrade of a 0.1 pg_tle install via the new file + `ALTER EXTENSION UPDATE` (config kept); file rerun is harmless |
 | Drop-impact fallback with no plan source (RDS-like) | Verified: candidates from query text, index use before/after correct |

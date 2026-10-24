@@ -1,5 +1,7 @@
 # T05 — Validate the SQL edition on a live Aurora cluster
 
+**Status (24 Oct 2026): done** for the Aurora writer (17.9.5, express configuration) and RDS 17.11. See `docs/AURORA-VALIDATION.md`. Open: the Aurora reader phase, which needs a paid-plan account (an extra instance).
+
 ## Goal
 Prove `index_deps` works on Aurora PostgreSQL and lock in a real fixture.
 

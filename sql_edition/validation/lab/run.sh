@@ -5,6 +5,8 @@
 #
 # Connection: standard libpq environment (PGHOST, PGPORT, PGUSER, PGPASSWORD
 # or ~/.pgpass, PGSSLMODE). Never pass the password on the command line.
+# PGPASSWORD_CMD, if set, is run before each psql to get a fresh password
+# (e.g. an RDS IAM auth token, valid 15 minutes for new connections).
 #
 #   ./run.sh <label> [--simulate-rds] [--pg-tle] [--scale N] [--keep]
 #                    [--admin-db postgres] [--out DIR]
@@ -35,11 +37,18 @@ while [ $# -gt 0 ]; do
   shift
 done
 out="${out:-$PWD/lab-out/$label}"
-mkdir -p "$out"
-out="$(cd "$out" && pwd)"
+if [ "$mode" != teardown ]; then
+  mkdir -p "$out"
+  out="$(cd "$out" && pwd)"
+fi
 
-psql_admin() { psql -X -v ON_ERROR_STOP=1 -d "$admin_db" "$@"; }
-psql_lab()   { psql -X -v ON_ERROR_STOP=1 -d index_lab "$@"; }
+refresh_password() {
+  if [ -n "${PGPASSWORD_CMD:-}" ]; then
+    PGPASSWORD="$(eval "$PGPASSWORD_CMD")"; export PGPASSWORD
+  fi
+}
+psql_admin() { refresh_password; psql -X -v ON_ERROR_STOP=1 -d "$admin_db" "$@"; }
+psql_lab()   { refresh_password; psql -X -v ON_ERROR_STOP=1 -d index_lab "$@"; }
 
 teardown() {
   psql_admin -q -c 'DROP DATABASE IF EXISTS index_lab WITH (FORCE)' \
@@ -89,7 +98,10 @@ BEGIN
 END $$;
 SQL
   if [ "$pg_tle" = 1 ]; then
-    psql_lab -q -c 'CREATE EXTENSION IF NOT EXISTS pg_tle' \
+    # Registering an extension with pg_tle needs the pgtle_admin role, which
+    # the RDS/Aurora master user doesn't have by default.
+    psql_lab -q -c 'CREATE EXTENSION IF NOT EXISTS pg_tle' -c 'GRANT pgtle_admin TO CURRENT_USER'
+    psql_lab -q \
                 -f "$repo/sql_edition/install_pg_tle.sql" \
                 -c 'CREATE EXTENSION pg_index_deps'
   else

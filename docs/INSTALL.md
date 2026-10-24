@@ -72,6 +72,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
    or through pg_tle (lets you `CREATE EXTENSION` / `ALTER EXTENSION UPDATE` later):
    ```sql
    CREATE EXTENSION IF NOT EXISTS pg_tle;   -- pg_tle must be in shared_preload_libraries
+   GRANT pgtle_admin TO CURRENT_USER;       -- the master user lacks it by default (seen on Aurora 17.9)
    \i sql_edition/install_pg_tle.sql
    CREATE EXTENSION pg_index_deps;
    ```
@@ -81,7 +82,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
 4. Grant read access to whoever investigates: `GRANT pg_read_all_stats TO analyst;` (to see all statements and plans).
 5. Check: `SELECT index_deps.resolved_plan_source();` should return `aurora_stat_plans`.
 
-> The Aurora path has **not yet been run against a live cluster** (see `docs/TESTING.md`). If `index_deps.plan_source()` errors on column names, compare with `SELECT * FROM aurora_stat_plans(true) LIMIT 1` and fix the adapter; task `codex/tasks/T05-aurora-validation.md` covers this. Step-by-step validation run: [AURORA-VALIDATION.md](AURORA-VALIDATION.md).
+> Verified on Aurora PostgreSQL 17.9.5 (express configuration) and RDS for PostgreSQL 17.11 on 24 Oct 2026; see `docs/TESTING.md` and [AURORA-VALIDATION.md](AURORA-VALIDATION.md). Free-plan accounts get express configuration only: attach your cluster parameter group (with `aurora_compute_plan_id = on`) after creation and reboot, and connect as `postgres` with an IAM auth token (`aws rds generate-db-auth-token`).
 
 ## 4. Amazon RDS for PostgreSQL
 

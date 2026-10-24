@@ -14,6 +14,13 @@
 # (db.t4g.medium), LAB_RDS_CLASS (db.t4g.micro), LAB_NO_READER=1 to skip the
 # reader instance. Master passwords are managed by RDS in Secrets Manager and
 # read only into this process's environment; nothing is written to disk.
+#
+# Free-plan accounts can only create Aurora with express configuration
+# (LAB_AURORA_EXPRESS=1): one Serverless v2 writer, no VPC networking (reached
+# over the internet), IAM authentication as user postgres, engine version
+# chosen by AWS. up then swaps in the lab's parameter group and reboots; a
+# reader can't be added on the free plan (instance quota), so run skips the
+# reader phase when there is no reader.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -35,7 +42,15 @@ SG_NAME="$P-sg"
 TAGS="Key=project,Value=$P"
 
 aws_() { aws --output text "$@"; }
-aurora_instances() { echo "$WRITER"; [ -n "${LAB_NO_READER:-}" ] || echo "$READER"; }
+aurora_instances() {
+  if [ -n "${LAB_AURORA_EXPRESS:-}" ]; then echo "$CLUSTER-instance-1"; return; fi
+  echo "$WRITER"; [ -n "${LAB_NO_READER:-}" ] || echo "$READER"
+}
+writer_instance() {
+  aws_ rds describe-db-clusters --db-cluster-identifier "$CLUSTER" \
+       --query 'DBClusters[0].DBClusterMembers[?IsClusterWriter==`true`].DBInstanceIdentifier | [0]'
+}
+reader_exists() { aws rds describe-db-instances --db-instance-identifier "$READER" >/dev/null 2>&1; }
 log() { printf '\n=== %s\n' "$*"; }
 
 sg_id() {
@@ -100,18 +115,27 @@ up() {
       "ParameterName=shared_preload_libraries,ParameterValue='pg_stat_statements,pg_tle',ApplyMethod=pending-reboot" >/dev/null
 
   log "Aurora cluster $CLUSTER"
-  aws rds describe-db-clusters --db-cluster-identifier "$CLUSTER" >/dev/null 2>&1 ||
-    aws rds create-db-cluster --db-cluster-identifier "$CLUSTER" --engine aurora-postgresql \
-        --engine-version "$apg_ver" --master-username "$USER_NAME" --manage-master-user-password \
-        --db-cluster-parameter-group-name "$CPG" --vpc-security-group-ids "$sg" \
-        --backup-retention-period 1 --no-deletion-protection --storage-encrypted --tags "$TAGS" >/dev/null
-  for inst in $(aurora_instances); do
-    aws rds describe-db-instances --db-instance-identifier "$inst" >/dev/null 2>&1 ||
-      aws rds create-db-instance --db-instance-identifier "$inst" --db-cluster-identifier "$CLUSTER" \
-          --engine aurora-postgresql --db-instance-class "$AURORA_CLASS" --publicly-accessible \
-          --no-auto-minor-version-upgrade --tags "$TAGS" >/dev/null
-    [ "$inst" = "$WRITER" ] && aws rds wait db-instance-available --db-instance-identifier "$WRITER"
-  done
+  if [ -n "${LAB_AURORA_EXPRESS:-}" ]; then
+    aws rds describe-db-clusters --db-cluster-identifier "$CLUSTER" >/dev/null 2>&1 ||
+      aws rds create-db-cluster --db-cluster-identifier "$CLUSTER" --engine aurora-postgresql \
+          --with-express-configuration --tags "$TAGS" >/dev/null
+    aws rds wait db-cluster-available --db-cluster-identifier "$CLUSTER"
+    aws rds modify-db-cluster --db-cluster-identifier "$CLUSTER" \
+        --db-cluster-parameter-group-name "$CPG" --apply-immediately >/dev/null
+  else
+    aws rds describe-db-clusters --db-cluster-identifier "$CLUSTER" >/dev/null 2>&1 ||
+      aws rds create-db-cluster --db-cluster-identifier "$CLUSTER" --engine aurora-postgresql \
+          --engine-version "$apg_ver" --master-username "$USER_NAME" --manage-master-user-password \
+          --db-cluster-parameter-group-name "$CPG" --vpc-security-group-ids "$sg" \
+          --backup-retention-period 1 --no-deletion-protection --storage-encrypted --tags "$TAGS" >/dev/null
+    for inst in $(aurora_instances); do
+      aws rds describe-db-instances --db-instance-identifier "$inst" >/dev/null 2>&1 ||
+        aws rds create-db-instance --db-instance-identifier "$inst" --db-cluster-identifier "$CLUSTER" \
+            --engine aurora-postgresql --db-instance-class "$AURORA_CLASS" --publicly-accessible \
+            --no-auto-minor-version-upgrade --tags "$TAGS" >/dev/null
+      [ "$inst" = "$WRITER" ] && aws rds wait db-instance-available --db-instance-identifier "$WRITER"
+    done
+  fi
 
   log "RDS instance $RDS"
   aws rds describe-db-instances --db-instance-identifier "$RDS" >/dev/null 2>&1 ||
@@ -145,19 +169,30 @@ secret_password() {  # $1 = secret ARN
 }
 
 connect_env() {  # $1 = cluster|rds, $2 = writer|reader
+  unset PGPASSWORD_CMD
   if [ "$1" = cluster ]; then
     arn="$(aws_ rds describe-db-clusters --db-cluster-identifier "$CLUSTER" --query 'DBClusters[0].MasterUserSecret.SecretArn')"
+    user="$(aws_ rds describe-db-clusters --db-cluster-identifier "$CLUSTER" --query 'DBClusters[0].MasterUsername')"
     if [ "$2" = reader ]; then
       host="$(aws_ rds describe-db-instances --db-instance-identifier "$READER" --query 'DBInstances[0].Endpoint.Address')"
     else
-      host="$(aws_ rds describe-db-instances --db-instance-identifier "$WRITER" --query 'DBInstances[0].Endpoint.Address')"
+      host="$(aws_ rds describe-db-clusters --db-cluster-identifier "$CLUSTER" --query 'DBClusters[0].Endpoint')"
     fi
   else
     arn="$(aws_ rds describe-db-instances --db-instance-identifier "$RDS" --query 'DBInstances[0].MasterUserSecret.SecretArn')"
+    user="$USER_NAME"
     host="$(aws_ rds describe-db-instances --db-instance-identifier "$RDS" --query 'DBInstances[0].Endpoint.Address')"
   fi
-  export PGHOST="$host" PGPORT=5432 PGUSER="$USER_NAME" PGSSLMODE=require
-  PGPASSWORD="$(secret_password "$arn")"; export PGPASSWORD
+  export PGHOST="$host" PGPORT=5432 PGUSER="$user" PGSSLMODE=require
+  if [ "$arn" = "None" ] || [ -z "$arn" ]; then
+    # No managed secret (express configuration): IAM auth token, refreshed
+    # by run.sh before each connection.
+    export PGPASSWORD_CMD="aws --output text rds generate-db-auth-token --hostname $host --port 5432 --username $user"
+    PGPASSWORD="$(eval "$PGPASSWORD_CMD")"
+  else
+    PGPASSWORD="$(secret_password "$arn")"
+  fi
+  export PGPASSWORD
 }
 
 run() {
@@ -171,7 +206,7 @@ run() {
   psql -X -d postgres -Atc "SELECT 'connected: ' || version()"
   "$lab/run.sh" "aurora-$ver-writer-$stamp" --pg-tle --keep --out "$out/aurora-$ver-$stamp" || echo "writer run exited $?"
 
-  if [ -z "${LAB_NO_READER:-}" ]; then
+  if reader_exists; then
     log "Aurora $ver reader phase"
     connect_env cluster reader
     "$lab/run.sh" "aurora-$ver-reader-$stamp" --reader --out "$out/aurora-$ver-$stamp" || echo "reader run exited $?"
@@ -197,11 +232,11 @@ status() {
 
 down() {
   log "deleting instances"
-  for inst in "$READER" "$WRITER" "$RDS"; do
+  for inst in "$READER" "$WRITER" "$CLUSTER-instance-1" "$RDS"; do
     aws rds delete-db-instance --db-instance-identifier "$inst" --skip-final-snapshot \
         --delete-automated-backups >/dev/null 2>&1 && echo "deleting $inst" || true
   done
-  for inst in "$READER" "$WRITER" "$RDS"; do
+  for inst in "$READER" "$WRITER" "$CLUSTER-instance-1" "$RDS"; do
     aws rds wait db-instance-deleted --db-instance-identifier "$inst" 2>/dev/null || true
   done
   log "deleting cluster"

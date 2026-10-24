@@ -99,21 +99,6 @@ SELECT tag, kind, stmt FROM (
   UNION ALL SELECT 'W33', 'sql', format('UPDATE lab.orders SET amount = amount WHERE id = %s /* lab:W33 */', g * 1201) FROM generate_series(1, 5) g
 ) w;
 
-\echo '=== workload: other database (index_lab2)'
-SELECT current_database() AS lab_db \gset
-\c index_lab2
-DROP SCHEMA IF EXISTS lab CASCADE;
-CREATE SCHEMA lab;
-CREATE TABLE lab.dbx (id int PRIMARY KEY, v int);
-INSERT INTO lab.dbx SELECT g, g % 2000 FROM generate_series(1, 20000) g;
-CREATE INDEX dbx_v_idx ON lab.dbx (v);
-VACUUM ANALYZE lab.dbx;
-\o /dev/null
-SELECT format('SELECT count(*) FROM lab.dbx WHERE v = %s /* lab:W39 */', g) FROM generate_series(1, 5) g \gexec
-\o
-EXPLAIN (COSTS OFF) SELECT count(*) FROM lab.dbx WHERE v = 1;
-\c :lab_db
-
 \echo '=== workload: run (output discarded)'
 SELECT clock_timestamp() AS workload_start \gset
 \o /dev/null

@@ -25,6 +25,7 @@ UPDATE index_deps.config SET value = 'none' WHERE key = 'plan_source';
 \endif
 
 SELECT clock_timestamp() AS lab_start \gset
+\ir otherdb.sql
 \ir seed.sql
 SELECT clock_timestamp() AS seed_done \gset
 \ir workload.sql

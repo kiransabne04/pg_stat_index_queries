@@ -9,8 +9,16 @@ The test itself is the index lab ([sql_edition/validation/lab/](../sql_edition/v
 | Target | Status |
 |---|---|
 | Docker PG 16, 17, 18: self-hosted path (pg_stat_plans) and simulated RDS path | Lab run 24 Oct 2026; results in [TESTING.md](TESTING.md#index-lab-docker-24-oct-2026) |
-| Aurora PostgreSQL 17 (writer + reader) | **Not run yet** |
-| RDS for PostgreSQL 17 | **Not run yet** |
+| Aurora PostgreSQL 17.9.5, express configuration (writer only) | Run 24 Oct 2026: 115 PASS, 0 FAIL, 4 KNOWN, pg_tle install. [Report](validation/2026-10-24-aurora-17.9-express-writer.md) |
+| Aurora reader phase | **Not run**: the free-plan account allows no extra instance. Rehearsed in Docker with a read-only session |
+| RDS for PostgreSQL 17.11 (db.t4g.micro) | Run 24 Oct 2026: 33 PASS, 0 FAIL, 2 KNOWN, plain install. [Report](validation/2026-10-24-rds-17.11.md) |
+
+What the run taught us:
+
+- **Free-plan accounts** (the new AWS experience) can create Aurora only with express configuration (`LAB_AURORA_EXPRESS=1`). AWS then picks the engine version (17.9 here), uses Serverless v2 (0–4 capacity units), turns off VPC networking (the cluster is reached over the internet), signs in as `postgres` with IAM tokens instead of a password, and allows no extra instance (no reader). A custom cluster parameter group can be attached after creation; it takes effect after a reboot.
+- **pg_tle install** needs `GRANT pgtle_admin TO CURRENT_USER;` first. The master user is `rds_superuser` but not `pgtle_admin`.
+- **IAM tokens** last 15 minutes for new connections. `run.sh` takes `PGPASSWORD_CMD` and fetches a fresh token before every connection; the lab's reconnect to the second database happens before the seed.
+- Columns of `aurora_stat_plans(true)` match the adapter; `pg_stat_statements.track = all` can be set per session by the master user.
 
 ## 0. What you need
 

@@ -37,7 +37,10 @@ SELECT q AS input, index_deps.explainable_query(q) AS explained
     'SELECT a FROM t WHERE b LIKE $1 ESCAPE $2',
     'PREPARE p(int, numeric(10,2)) AS SELECT $1 + $2, $10',
     'prepare "Q"  as select 1',
-    'SELECT 1'
+    'SELECT 1',
+    '/* app:checkout */ SELECT * FROM t WHERE a = $1',
+    E'-- traced\n  /* a */ /* b */ PREPARE p(int) AS SELECT $1',
+    'SELECT 1 /* trailing comment stays */'
   ]) AS q;
 
 SELECT count(*) FROM o WHERE c = 8 AND now() - interval '1 day' < now();
@@ -91,4 +94,43 @@ SELECT left(query, 50) AS query, uses_index_now, plan_changed, note
  WHERE query LIKE 'SELECT count(*) FROM pi%'
  ORDER BY query;
 UPDATE index_deps.config SET value = 'auto' WHERE key = 'plan_source';
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+
+-- 0.4: runs in a read-only transaction (Aurora reader, hot standby).
+BEGIN READ ONLY;
+SELECT uses_index_now, uses_index_after, plan_changed, note
+  FROM index_deps.index_drop_impact('o_c_idx')
+ WHERE query LIKE '%FROM o WHERE c = $1';
+COMMIT;
+
+-- 0.4: p_timeout_ms is a budget for the whole call; once used up, the
+-- remaining queries are reported as skipped.
+SELECT DISTINCT note FROM index_deps.index_drop_impact('o_c_idx', p_timeout_ms => 0);
+
+-- 0.4: a hypothetical HypoPG index in the session is flagged.
+SELECT indexname LIKE '<%>btree_o_c' AS hypothetical FROM hypopg_create_index('CREATE INDEX ON o (c)');
+SELECT note LIKE '%warning: the plans use a hypothetical HypoPG index%' AS warned
+  FROM index_deps.index_drop_impact('o_c_idx')
+ WHERE query LIKE '%FROM o WHERE c = $1';
+SELECT hypopg_reset();
+
+-- 0.4: drop_blocker says what else depends on the index.
+SELECT DISTINCT drop_blocker FROM index_deps.index_drop_impact('o_pkey');
+
+-- 0.4: cancelled while the index is hidden, it must still be unhidden.
+-- Planning this query takes 0.5 s (immutable function folded at plan time):
+-- EXPLAIN 0.5 s, hide, EXPLAIN 0.5 s; cancelled at 0.75 s, during the second.
+CREATE FUNCTION slow_plan() RETURNS int LANGUAGE plpgsql IMMUTABLE AS
+$$ BEGIN PERFORM pg_sleep(0.5); RETURN 1; END $$;
+CREATE TABLE sp (id int, a int);
+INSERT INTO sp SELECT g, g % 100 FROM generate_series(1, 10000) g;
+CREATE INDEX sp_a_idx ON sp (a);
+ANALYZE sp;
+SELECT count(*) FROM sp WHERE a = 5 AND slow_plan() = 1;
+SELECT pg_stat_force_next_flush();
+\set VERBOSITY terse
+SET statement_timeout = '750ms';
+SELECT count(*) FROM index_deps.index_drop_impact('sp_a_idx');
+RESET statement_timeout;
+\set VERBOSITY default
 SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();

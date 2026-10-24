@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- **SQL edition 0.4** (upgrade script 0.3 → 0.4; installers regenerated; regression tests pass on PG 16–18):
+  - **Fix:** if `index_drop_impact` was cancelled (statement_timeout, pg_cancel_backend) while the index was hidden, the index stayed hidden for the rest of the session. It is now unhidden on cancel, and the error is re-raised.
+  - **Fix:** `index_drop_impact` now works in read-only transactions (Aurora readers, hot standbys); the temp table is gone.
+  - **Fix:** roles without superuser got `permission denied for table config` from every view. `index_deps.config` is now readable by PUBLIC.
+  - **Fix:** queries whose text starts with a comment were skipped as "not a read query"; leading comments are now stripped.
+  - **Change:** `p_timeout_ms` is now a time budget for the whole call (default 30 s). The old per-statement timeout never took effect.
+  - `index_drop_impact` warns when the plans use a HypoPG hypothetical index, and has a new column `drop_blocker`.
+  - **New:** `index_deps.index_role(regclass)` gives the index's role (primary key, unique constraint, exclusion constraint, unique index, index), notes (referenced by foreign keys, replica identity, clustered, invalid, partial, expression, partition) and what blocks a drop. `index_dependents` and `index_query_stats` show the role.
+  - **New:** `index_deps.index_usage`, one row per index with a verdict. **New:** `index_deps.unresolved_plan_indexes`, index names in plans that no longer exist. `index_no_dependents` now leaves out indexes on tables whose plans name a missing index (renamed or dropped), because the renamed index may be one of them.
 - **Index lab** (`sql_edition/validation/lab/`): end-to-end validation on a synthetic workload. It covers 40 cases, 73 indexes and about 100 checks (170 with the native ground-truth checks): attribution against EXPLAIN ground truth (and the native extension where available), unused-index listing, `index_query_stats`, drop impact and error paths. It writes a markdown report with PASS / FAIL / KNOWN, feedback and plan fixtures. It runs on Docker, Aurora (writer + reader phase) and RDS, with simulated RDS mode.
 - `sql_edition/validation/lab/aws/lab-aws.sh`: preflight / up / run / status / down for the Aurora + RDS validation (T05), plus a least-privilege IAM policy. `docs/AURORA-VALIDATION.md` rewritten as a run sheet.
 - Docker lab runs on PG 16–18 found six SQL edition issues, listed in `docs/TESTING.md` (most serious: an index stays hidden in the session after a cancelled `index_drop_impact`, and drop impact fails in read-only transactions). Not fixed yet.

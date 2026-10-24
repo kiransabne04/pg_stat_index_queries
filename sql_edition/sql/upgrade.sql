@@ -19,3 +19,31 @@ SELECT to_regclass('index_deps.index_query_stats') IS NULL AS query_stats_absent
 ALTER EXTENSION pg_index_deps UPDATE TO '0.3';
 SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
 SELECT to_regclass('index_deps.index_query_stats') IS NOT NULL AS query_stats_present_in_0_3;
+-- 0.3 -> 0.4: index_role, index_usage, unresolved_plan_indexes; drop_impact
+-- rewritten (drop_blocker column); config readable by everyone.
+SELECT to_regclass('index_deps.index_usage') IS NULL AS usage_absent_in_0_3;
+ALTER EXTENSION pg_index_deps UPDATE TO '0.4';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
+SELECT to_regclass('index_deps.index_usage') IS NOT NULL AS usage_present,
+       to_regclass('index_deps.unresolved_plan_indexes') IS NOT NULL AS unresolved_present,
+       EXISTS (SELECT 1 FROM aclexplode((SELECT relacl FROM pg_class WHERE oid = 'index_deps.config'::regclass)) a
+                WHERE a.grantee = 0 AND a.privilege_type = 'SELECT') AS config_public;
+SELECT value AS plan_source_kept FROM index_deps.config WHERE key = 'plan_source';
+-- The upgraded objects must be identical to a fresh 0.4 install.
+CREATE TEMP TABLE defs_upgraded AS
+SELECT 'function ' || p.oid::regprocedure::text AS name, pg_get_functiondef(p.oid) AS def
+  FROM pg_proc p WHERE p.pronamespace = 'index_deps'::regnamespace
+UNION ALL
+SELECT 'view ' || c.relname, pg_get_viewdef(c.oid)
+  FROM pg_class c WHERE c.relnamespace = 'index_deps'::regnamespace AND c.relkind = 'v';
+DROP EXTENSION pg_index_deps;
+CREATE EXTENSION pg_index_deps;
+SELECT name AS differs_from_fresh_install
+  FROM (SELECT 'function ' || p.oid::regprocedure::text AS name, pg_get_functiondef(p.oid) AS def
+          FROM pg_proc p WHERE p.pronamespace = 'index_deps'::regnamespace
+        UNION ALL
+        SELECT 'view ' || c.relname, pg_get_viewdef(c.oid)
+          FROM pg_class c WHERE c.relnamespace = 'index_deps'::regnamespace AND c.relkind = 'v') fresh
+  FULL JOIN defs_upgraded USING (name)
+ WHERE fresh.def IS DISTINCT FROM defs_upgraded.def
+ ORDER BY 1;

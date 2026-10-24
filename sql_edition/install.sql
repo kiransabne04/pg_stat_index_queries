@@ -1,7 +1,7 @@
--- pg_index_deps 0.3, plain install (generated, do not edit)
+-- pg_index_deps 0.4, plain install (generated, do not edit)
 CREATE SCHEMA IF NOT EXISTS index_deps;
 SET search_path = index_deps, public;
-/* pg_index_deps--0.3.sql
+/* pg_index_deps--0.4.sql
  *
  * SQL edition of pg_stat_index_queries. No C code, so it installs on managed
  * Postgres (Amazon Aurora, RDS) as well as self-hosted servers.
@@ -12,6 +12,8 @@ SET search_path = index_deps, public;
  *    names the index, not confirmed executions.
  *  - index_deps.index_query_stats: each (index, query) with the query's
  *    pg_stat_statements statistics, for debugging.
+ *  - index_deps.index_usage: one row per index with its role (primary key,
+ *    unique constraint, foreign keys that reference it, ...) and a verdict.
  *  - index_deps.index_drop_impact(): hides an index with HypoPG and re-plans
  *    each dependent query with EXPLAIN (GENERIC_PLAN). Never drops anything
  *    and never executes a query. Needs PostgreSQL 16+ and HypoPG 1.4+.
@@ -32,6 +34,9 @@ CREATE TABLE index_deps.config (
 -- (queryid bigint, planid bigint, calls bigint, plan_text text).
 INSERT INTO index_deps.config VALUES ('plan_source', 'auto');
 
+
+-- Roles without superuser read the plan_source setting through every view.
+GRANT SELECT ON index_deps.config TO PUBLIC;
 
 -- ---------------------------------------------------------------------------
 -- Plan source adapter
@@ -103,6 +108,77 @@ AS $$ SELECT CASE WHEN left($1, 1) = '"' AND right($1, 1) = '"'
                   THEN replace(substr($1, 2, length($1) - 2), '""', '"')
                   ELSE $1 END $$;
 
+-- What an index is for besides speeding up queries, and what dropping it
+-- would break. index_role: primary key | unique constraint | exclusion
+-- constraint | unique index | index. index_notes: foreign keys that
+-- reference it, replica identity, clustered, invalid, partial, expression,
+-- partitions. drop_blocker: why DROP INDEX fails or changes behaviour
+-- (NULL when nothing but query speed depends on it).
+CREATE FUNCTION index_deps.index_role(
+    p_index regclass,
+    OUT index_role text,
+    OUT index_notes text[],
+    OUT drop_blocker text)
+LANGUAGE sql STABLE
+AS $$
+    WITH ix AS (
+        SELECT x.*, i.relkind, i.relispartition,
+               (SELECT ip.inhparent::regclass::text FROM pg_inherits ip
+                 WHERE ip.inhrelid = x.indexrelid) AS parent_index,
+               to_jsonb(x) ->> 'indnullsnotdistinct' AS nulls_not_distinct
+          FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid
+         WHERE x.indexrelid = p_index
+    ),
+    k AS (
+        SELECT c.conname, c.contype, c.condeferrable
+          FROM pg_constraint c, ix
+         WHERE c.conindid = ix.indexrelid AND c.conrelid = ix.indrelid
+           AND c.contype IN ('p', 'u', 'x')
+         LIMIT 1
+    ),
+    fk AS (
+        SELECT array_agg(format('referenced by foreign key %s on %s', f.conname, f.conrelid::regclass)
+                         ORDER BY f.conrelid::regclass::text, f.conname) AS refs
+          FROM pg_constraint f, ix
+         WHERE f.contype = 'f' AND f.conindid = ix.indexrelid AND f.conparentid = 0
+    ),
+    r AS (
+        SELECT ix.*, k.conname, k.contype, k.condeferrable, fk.refs,
+               CASE k.contype WHEN 'p' THEN 'primary key'
+                              WHEN 'u' THEN 'unique constraint'
+                              WHEN 'x' THEN 'exclusion constraint'
+                              ELSE CASE WHEN ix.indisunique THEN 'unique index' ELSE 'index' END
+               END AS role
+          FROM ix LEFT JOIN k ON true LEFT JOIN fk ON true
+    )
+    SELECT r.role,
+           array_remove(ARRAY[
+               CASE WHEN r.condeferrable THEN 'deferrable constraint' END,
+               CASE WHEN r.nulls_not_distinct = 'true' THEN 'nulls not distinct' END,
+               CASE WHEN r.indisreplident THEN 'replica identity' END,
+               CASE WHEN r.indisclustered THEN 'clustered (CLUSTER uses it)' END,
+               CASE WHEN NOT r.indisvalid THEN 'invalid: the planner never uses it (failed CREATE INDEX CONCURRENTLY?)' END,
+               CASE WHEN r.indpred IS NOT NULL THEN 'partial: WHERE ' || pg_get_expr(r.indpred, r.indrelid) END,
+               CASE WHEN r.indexprs IS NOT NULL THEN 'expression index' END,
+               CASE WHEN r.relkind = 'I' THEN 'partitioned index (one index per partition)' END,
+               CASE WHEN r.relispartition THEN 'partition of index ' || r.parent_index END
+           ]::text[], NULL) || coalesce(r.refs, '{}'),
+           nullif(concat_ws('; ',
+               CASE WHEN r.contype IS NOT NULL
+                    THEN format('enforces %s %s: DROP INDEX fails, dropping the constraint removes the guarantee',
+                                r.role, r.conname) END,
+               CASE WHEN r.contype IS NULL AND r.indisunique
+                    THEN 'enforces uniqueness: dropping it allows duplicates' END,
+               CASE WHEN r.refs IS NOT NULL
+                    THEN 'foreign keys depend on it: ' || array_to_string(r.refs, ', ') END,
+               CASE WHEN r.indisreplident
+                    THEN 'replica identity: logical replication and CDC use it' END,
+               CASE WHEN r.relispartition
+                    THEN 'attached to partitioned index ' || r.parent_index || ': drop that instead' END
+           ), '')
+      FROM r
+$$;
+
 -- Every index reference found in every captured plan.
 -- Handles: Index Scan [Backward] using IDX on TBL, Index Only Scan [Backward]
 -- using IDX on TBL, Bitmap Index Scan on IDX. Plans in text format.
@@ -123,6 +199,20 @@ SELECT DISTINCT
            p.plan_text,
            '(Index Only Scan|Index Scan|Bitmap Index Scan)(?: Backward)? (?:using|on) ("(?:[^"]|"")+"|[^[:space:]]+)(?: on ("(?:[^"]|"")+"|[^[:space:]]+))?',
            'g') AS m;
+
+-- Index names in captured plans that no longer resolve to any index:
+-- renamed or dropped since the plan was captured. table_hint is the table
+-- the plan names next to it (resolved, when it exists).
+CREATE VIEW index_deps.unresolved_plan_indexes AS
+SELECT u.queryid, u.planid, u.calls, u.scan_type, u.index_name,
+       coalesce(u.table_name,
+                index_deps.unquote_ident((regexp_match(u.plan_text, 'Bitmap Heap Scan on ("(?:[^"]|"")+"|[^[:space:]]+)'))[1])
+       ) AS table_hint,
+       u.source
+  FROM index_deps.plan_index_usage u
+ WHERE NOT EXISTS (SELECT 1 FROM pg_class i
+                    WHERE i.relname = u.index_name AND i.relkind IN ('i', 'I'))
+   AND u.index_name !~ '^<[0-9]+>';   -- HypoPG hypothetical indexes
 
 -- Resolve index names to OIDs in the current database.
 -- EXPLAIN prints unqualified names, so the same name in two schemas is
@@ -157,13 +247,16 @@ SELECT schemaname,
        sum(calls)::bigint   AS calls,
        string_agg(DISTINCT scan_type, ',') AS scan_types,
        bool_or(n_candidates > 1) AS ambiguous,
-       min(source)          AS source
+       min(source)          AS source,
+       (SELECT r.index_role FROM index_deps.index_role(indexrelid) r) AS index_role
   FROM candidates
  GROUP BY schemaname, tablename, index_name, indexrelid, queryid;
 
 -- User indexes that no captured plan references. Only as good as the plan
 -- source: queries without a captured plan, or evicted from
 -- pg_stat_statements, are invisible. Excludes PK, unique and constraint indexes.
+-- Also leaves out indexes on a table whose captured plans name an index
+-- that no longer exists (renamed or dropped): it may be one of these.
 -- With no plan source (plan_source = none, e.g. RDS) it returns no rows:
 -- nothing is known about any index, so nothing is reported as unused.
 -- Partitioned tables: one row per partitioned (parent) index, which counts
@@ -190,7 +283,71 @@ SELECT n.nspname AS schemaname,
    AND NOT i.relispartition
    AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = x.indexrelid)
    AND NOT EXISTS (SELECT 1 FROM index_deps.index_dependents d
-                    WHERE coalesce(pg_partition_root(d.indexrelid), d.indexrelid) = x.indexrelid);
+                    WHERE coalesce(pg_partition_root(d.indexrelid), d.indexrelid) = x.indexrelid)
+   AND NOT EXISTS (SELECT 1 FROM index_deps.unresolved_plan_indexes u
+                    WHERE u.table_hint IS NULL OR u.table_hint = t.relname
+                       OR u.table_hint IN (SELECT pt.relname FROM pg_partition_tree(t.oid) a
+                                             JOIN pg_class pt ON pt.oid = a.relid));
+
+-- One row per index (partition indexes folded into their parent): its role,
+-- how many captured queries used it, and a verdict.
+CREATE VIEW index_deps.index_usage AS
+WITH idx AS (
+    SELECT n.nspname AS schemaname, t.relname AS tablename, i.relname AS indexname,
+           x.indexrelid, x.indisvalid, t.oid AS tableoid,
+           coalesce((SELECT sum(pg_relation_size(p.relid))
+                       FROM pg_partition_tree(x.indexrelid) p),
+                    pg_relation_size(x.indexrelid))::bigint AS index_bytes
+      FROM pg_index x
+      JOIN pg_class i ON i.oid = x.indexrelid
+      JOIN pg_class t ON t.oid = x.indrelid
+      JOIN pg_namespace n ON n.oid = i.relnamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'index_deps')
+       AND n.nspname NOT LIKE 'pg_toast%'
+       AND NOT i.relispartition
+),
+dep AS (
+    SELECT coalesce(pg_partition_root(d.indexrelid), d.indexrelid) AS indexrelid,
+           count(DISTINCT d.queryid) AS queries, sum(d.calls)::bigint AS calls,
+           bool_or(d.ambiguous) AS ambiguous
+      FROM index_deps.index_dependents d
+     GROUP BY 1
+),
+unres AS (
+    SELECT u.table_hint, string_agg(DISTINCT u.index_name, ', ') AS names
+      FROM index_deps.unresolved_plan_indexes u
+     GROUP BY 1
+)
+SELECT idx.schemaname, idx.tablename, idx.indexname, idx.indexrelid,
+       r.index_role, r.index_notes, r.drop_blocker, idx.index_bytes,
+       coalesce(dep.queries, 0) AS queries,
+       coalesce(dep.calls, 0) AS calls,
+       CASE
+         WHEN index_deps.resolved_plan_source() = 'none'
+           THEN 'unknown: no plan source (use index_drop_impact to test queries)'
+         WHEN dep.queries > 0
+           THEN format('used by %s %s', dep.queries, CASE WHEN dep.queries = 1 THEN 'query' ELSE 'queries' END)
+                || CASE WHEN dep.ambiguous THEN ' (ambiguous name: may be another schema''s index)' ELSE '' END
+         WHEN un.names IS NOT NULL
+           THEN 'unknown: plans on this table name ' || un.names || ', which no longer exists (renamed or dropped?)'
+         WHEN NOT idx.indisvalid
+           THEN 'invalid: never used by the planner; drop it or REINDEX'
+         WHEN r.drop_blocker IS NOT NULL
+           THEN 'no captured query uses it, but ' || r.drop_blocker
+         ELSE 'no captured query uses it: drop candidate (check on replicas and over a full business cycle)'
+       END AS verdict,
+       index_deps.resolved_plan_source() AS source
+  FROM idx
+  CROSS JOIN LATERAL index_deps.index_role(idx.indexrelid) r
+  LEFT JOIN dep ON dep.indexrelid = idx.indexrelid
+  LEFT JOIN LATERAL (
+       SELECT string_agg(DISTINCT u.names, ', ') AS names
+         FROM unres u
+        WHERE u.table_hint IS NULL OR u.table_hint = idx.tablename
+           OR u.table_hint IN (SELECT pt.relname FROM pg_partition_tree(idx.tableoid) a
+                                 JOIN pg_class pt ON pt.oid = a.relid)) un ON true;
+
+GRANT SELECT ON index_deps.unresolved_plan_indexes, index_deps.index_usage TO PUBLIC;
 
 -- ---------------------------------------------------------------------------
 -- Drop-impact check
@@ -229,6 +386,9 @@ DECLARE
     w      text;
     i      int;
 BEGIN
+    -- Leading /* ... */ and -- comments (not nested).
+    q := regexp_replace(q, '^(\s*(/\*([^*]|\*+[^*/])*\*+/|--[^\n]*(\n|$)))+\s*', '');
+
     m := regexp_match(q, '^\s*PREPARE\s+(?:"(?:[^"]|"")+"|[[:alnum:]_]+)\s*(?:\(((?:[^()]|\([^()]*\))*)\))?\s+AS\s+(.*)$', 'is');
     IF m IS NOT NULL THEN
         q := m[2];
@@ -280,7 +440,7 @@ $$;
 CREATE FUNCTION index_deps.index_drop_impact(
     p_index         regclass,
     p_include_dml   boolean DEFAULT false,
-    p_timeout_ms    integer DEFAULT 2000,
+    p_timeout_ms    integer DEFAULT 30000,
     p_max_queries   integer DEFAULT 50)
 RETURNS TABLE (
     queryid          bigint,
@@ -294,7 +454,8 @@ RETURNS TABLE (
     shape_with       text,
     shape_without    text,
     note             text,
-    query            text)
+    query            text,
+    drop_blocker     text)
 LANGUAGE plpgsql VOLATILE
 AS $$
 DECLARE
@@ -302,9 +463,11 @@ DECLARE
     v_table_name   text;
     v_pred         text;
     v_pred_const   boolean;
-    v_old_timeout  text := current_setting('statement_timeout');
+    v_blocker      text;
     v_hidden       boolean := false;
     v_source       text;
+    v_cands        jsonb;
+    v_start        timestamptz := clock_timestamp();
     r              record;
     j_with         jsonb;
     j_without      jsonb;
@@ -334,63 +497,66 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION '% is not an index', p_index;
     END IF;
+    SELECT ir.drop_blocker INTO v_blocker FROM index_deps.index_role(p_index) ir;
 
-    -- Candidate queries, best source first.
-    IF to_regclass('pg_temp.index_deps_candidates') IS NULL THEN
-        CREATE TEMP TABLE index_deps_candidates (queryid bigint, calls bigint);
-    END IF;
-    TRUNCATE index_deps_candidates;
-
+    -- Candidate queries, best source first. Kept in a variable, not a temp
+    -- table, so the function runs in read-only transactions.
     IF to_regclass('pg_stat_index_queries') IS NOT NULL THEN
         v_source := 'pg_stat_index_queries';
         EXECUTE $q$
-            INSERT INTO index_deps_candidates
-            SELECT s.queryid, sum(s.calls_executed)
-              FROM pg_stat_index_queries s
-             WHERE s.indexrelid = $1
-               AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-             GROUP BY 1 $q$ USING p_index::oid;
+            SELECT jsonb_agg(jsonb_build_array(c.queryid, c.calls))
+              FROM (SELECT s.queryid, sum(s.calls_executed) AS calls
+                      FROM pg_stat_index_queries s
+                     WHERE s.indexrelid = $1
+                       AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                     GROUP BY 1) c $q$ INTO v_cands USING p_index::oid;
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM index_deps_candidates)
-       AND index_deps.resolved_plan_source() <> 'none' THEN
+    IF v_cands IS NULL AND index_deps.resolved_plan_source() <> 'none' THEN
         v_source := 'captured plans';
-        INSERT INTO index_deps_candidates
-        SELECT d.queryid, sum(d.calls)
-          FROM index_deps.index_dependents d
-         WHERE d.indexrelid = p_index::oid
-         GROUP BY 1;
+        SELECT jsonb_agg(jsonb_build_array(c.queryid, c.calls)) INTO v_cands
+          FROM (SELECT d.queryid, sum(d.calls) AS calls
+                  FROM index_deps.index_dependents d
+                 WHERE d.indexrelid = p_index::oid
+                 GROUP BY 1) c;
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM index_deps_candidates) THEN
+    IF v_cands IS NULL THEN
         -- Fallback: every statement whose text mentions the table.
         v_source := 'query text mentions table';
         EXECUTE $q$
-            INSERT INTO index_deps_candidates
-            SELECT s.queryid, sum(s.calls)
-              FROM pg_stat_statements s
-             WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-               AND s.query ~* ('\m' || $1 || '\M')
-             GROUP BY 1 $q$ USING v_table_name;
+            SELECT jsonb_agg(jsonb_build_array(c.queryid, c.calls))
+              FROM (SELECT s.queryid, sum(s.calls) AS calls
+                      FROM pg_stat_statements s
+                     WHERE s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                       AND s.query ~* ('\m' || $1 || '\M')
+                     GROUP BY 1) c $q$ INTO v_cands USING v_table_name;
     END IF;
 
     FOR r IN EXECUTE $q$
-        SELECT c.queryid, c.calls, max(s.query) AS query
-          FROM index_deps_candidates c
+        SELECT (c.e ->> 0)::bigint AS queryid, (c.e ->> 1)::bigint AS calls, max(s.query) AS query
+          FROM jsonb_array_elements(coalesce($2, '[]')) AS c(e)
           JOIN pg_stat_statements s
-            ON s.queryid = c.queryid
+            ON s.queryid = (c.e ->> 0)::bigint
            AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-         GROUP BY c.queryid, c.calls
-         ORDER BY c.calls DESC NULLS LAST
-         LIMIT $1 $q$ USING p_max_queries
+         GROUP BY 1, 2
+         ORDER BY 2 DESC NULLS LAST
+         LIMIT $1 $q$ USING p_max_queries, v_cands
     LOOP
         queryid := r.queryid;
         calls := r.calls;
         query := left(r.query, 300);
+        drop_blocker := v_blocker;
         cost_with := NULL; cost_without := NULL; cost_ratio := NULL;
         uses_index_now := NULL; uses_index_after := NULL; plan_changed := NULL;
         shape_with := NULL; shape_without := NULL;
         note := 'candidates from ' || v_source;
+
+        IF clock_timestamp() - v_start > make_interval(secs => p_timeout_ms / 1000.0) THEN
+            note := format('skipped: time budget used up (p_timeout_ms = %s)', p_timeout_ms);
+            RETURN NEXT;
+            CONTINUE;
+        END IF;
 
         v_sql := index_deps.explainable_query(r.query);
 
@@ -402,8 +568,6 @@ BEGIN
         END IF;
 
         BEGIN
-            PERFORM set_config('statement_timeout', p_timeout_ms::text, true);
-
             EXECUTE 'EXPLAIN (GENERIC_PLAN, FORMAT JSON) ' || v_sql INTO j_with;
 
             PERFORM hypopg_hide_index(p_index::oid);
@@ -443,20 +607,34 @@ BEGIN
                         || '; check with EXPLAIN using real values ('
                         || note || ')';
             END IF;
-        EXCEPTION WHEN OTHERS THEN
-            -- HypoPG state lives in backend memory, not in the transaction,
-            -- so it must be undone here explicitly.
-            IF v_hidden THEN
-                PERFORM hypopg_unhide_index(p_index::oid);
-                v_hidden := false;
+
+            -- HypoPG hypothetical indexes in this session take part in both
+            -- plans, so the result isn't about the real schema.
+            IF concat(shape_with, shape_without) ~ 'using <[0-9]+>' THEN
+                note := note || '; warning: the plans use a hypothetical HypoPG index from this session'
+                             || ' (hypopg_reset() to remove), so this is not the real schema';
             END IF;
-            note := 'skipped: ' || SQLERRM;
+        EXCEPTION
+            WHEN query_canceled THEN
+                -- Cancelled (statement_timeout, pg_cancel_backend): unhide,
+                -- or the index stays hidden for the rest of the session.
+                IF v_hidden THEN
+                    PERFORM hypopg_unhide_index(p_index::oid);
+                END IF;
+                RAISE;
+            WHEN OTHERS THEN
+                -- HypoPG state lives in backend memory, not in the
+                -- transaction, so it must be undone here explicitly.
+                IF v_hidden THEN
+                    PERFORM hypopg_unhide_index(p_index::oid);
+                    v_hidden := false;
+                END IF;
+                note := 'skipped: ' || SQLERRM;
         END;
 
         RETURN NEXT;
     END LOOP;
 
-    PERFORM set_config('statement_timeout', v_old_timeout, true);
     IF v_hidden THEN
         PERFORM hypopg_unhide_index(p_index::oid);
     END IF;
@@ -465,7 +643,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION index_deps.index_drop_impact(regclass, boolean, integer, integer) IS
-'Estimate what happens to dependent queries if an index is dropped. Hides the index with HypoPG (this session only), re-plans with EXPLAIN (GENERIC_PLAN), compares cost and plan shape. Never executes queries or drops anything.';
+'Estimate what happens to dependent queries if an index is dropped. Hides the index with HypoPG (this session only), re-plans with EXPLAIN (GENERIC_PLAN), compares cost and plan shape. Never executes queries or drops anything. Works in read-only transactions. p_timeout_ms is a time budget for the whole call.';
 
 GRANT USAGE ON SCHEMA index_deps TO PUBLIC;
 GRANT SELECT ON index_deps.plan_index_usage, index_deps.index_dependents,
@@ -486,6 +664,8 @@ CREATE FUNCTION index_deps.index_query_stats(
     OUT index_bytes bigint,
     OUT is_unique bool,
     OUT is_partial bool,
+    OUT index_role text,
+    OUT index_notes text[],
     OUT queryid bigint,
     OUT index_plans bigint,
     OUT index_calls bigint,
@@ -569,6 +749,7 @@ BEGIN
                pg_relation_size(d.indexrelid),
                x.indisunique,
                x.indpred IS NOT NULL,
+               ir.index_role, ir.index_notes,
                d.queryid, d.plans, d.calls,
                round(100.0 * d.calls / nullif(s.calls, 0), 1),
                d.scan_types, d.ambiguous, d.source,
@@ -587,6 +768,7 @@ BEGIN
                s.roles, s.query
           FROM d
           JOIN pg_index x ON x.indexrelid = d.indexrelid
+          CROSS JOIN LATERAL index_deps.index_role(d.indexrelid) ir
           LEFT JOIN s ON s.queryid = d.queryid
     $q$, v_pgss);
 END;

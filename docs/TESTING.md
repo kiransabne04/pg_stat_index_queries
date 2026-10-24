@@ -61,12 +61,51 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 | Native build (`COPT=-Werror`) + regression + TAP, PG 15.19, 16.15, 17.11, 18.6 | Pass (Docker, Debian PGDG images, arm64) |
 | SQL edition tests, PG 16, 17, 18 (pg_stat_plans 2.1 + HypoPG 1.4.3) | Pass (Docker, arm64). PG 15 skipped by design |
 | Native build + regression + TAP on macOS arm64, Homebrew PG 17.11 (clang 21, `-Werror`) | Pass |
-| CI workflow, all 7 jobs (native 15–18, sql-edition 16–18) | Pass locally via `scripts/ci-local.sh` (ubuntu:24.04, linux/amd64, PGDG). **Not yet run on GitHub** |
+| CI workflow, all 7 jobs (native 15–18, sql-edition 16–18) | Pass locally via `scripts/ci-local.sh` (ubuntu:24.04, linux/amd64, PGDG), and on GitHub Actions (run 39908116705, 23 Oct 2026, commit 9e6c2ac) |
 | `aurora_stat_plans` adapter | **Not yet run on Aurora**: column names taken from AWS docs |
-| `sql_edition/validation/managed_check.sql` (T05 script) | Dry-run on PG 17 playground: self-hosted path and RDS path (`-v simulate_rds=1`). Aurora/RDS runs pending, see [AURORA-VALIDATION.md](AURORA-VALIDATION.md) |
+| Index lab (`sql_edition/validation/lab/`) | Docker PG 16–18, both modes, 24 Oct 2026: see below. Aurora/RDS pending |
+| `sql_edition/validation/managed_check.sql` (T05 smoke test) | Dry-run on PG 17 playground: self-hosted path and RDS path (`-v simulate_rds=1`). Aurora/RDS runs pending, see [AURORA-VALIDATION.md](AURORA-VALIDATION.md) |
 | `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk. 0.2 (22 Oct, pg_tle 6340fd2, PG 16): fresh install; upgrade of a 0.1 pg_tle install via the new file + `ALTER EXTENSION UPDATE` (config kept); file rerun is harmless |
 | Drop-impact fallback with no plan source (RDS-like) | Verified: candidates from query text, index use before/after correct |
 | Docker image (test runner + playground) | Built and run on macOS arm64, PG 15–18 |
+
+## Index lab (Docker, 24 Oct 2026)
+
+`sql_edition/validation/lab/run.sh` against the Docker playground image (arm64, pg_stat_plans 2.1, HypoPG 1.4.3, native 0.4 as ground truth, scale 1: ~3.8M rows, 73 indexes; ~12 s per run). "rds" = `--simulate-rds` (plan_source = none). Counts include the native ground-truth rows.
+
+| Run | PASS | FAIL | KNOWN |
+|---|---|---|---|
+| PG 16.15 | 159 | 6 | 5 |
+| PG 16.15 rds | 88 | 6 | 2 |
+| PG 17.11 | 159 | 6 | 5 |
+| PG 17.11 rds | 88 | 6 | 2 |
+| PG 18.6 | 160 | 5 | 5 |
+| PG 18.6 rds | 88 | 5 | 2 |
+
+What passed everywhere:
+
+- Attribution matches EXPLAIN for 36 of the 38 cases (the two exceptions are known limitations, below). This covers every scan type and index type, partitions, names that need quoting, PREPARE, DML, views and nested statements (with `track = all`).
+- No index that was used is listed as unused (other than the renamed one, below).
+- The partial-index, typed-literal, duplicate-index and composite-fallback drop-impact cases give the expected result.
+- All error paths give a clear message.
+- The native extension agrees with EXPLAIN on every case except where it is designed to differ: a recreated index has a new OID.
+
+Failures found (open, to be fixed in SQL edition 0.4):
+
+| Case | Severity | Finding |
+|---|---|---|
+| D-cancel-unhide | critical | If `index_drop_impact` is cancelled (statement_timeout, pg_cancel_backend) while the index is hidden, it stays hidden for the rest of the session, and that connection's real queries stop using it. `WHEN OTHERS` does not catch `query_canceled` |
+| D-read-only | high | `index_drop_impact` fails in a read-only transaction (`cannot execute CREATE TABLE`), so it can't run on an Aurora reader or hot standby. Cause: the candidates temp table |
+| E-unprivileged | high | A role without superuser gets `permission denied for table config` from every view; `index_deps.config` has no SELECT grant |
+| D-leading-comment | medium | PG 16/17: a query whose text starts with a comment is skipped as "not a read query". PG 18 passes, because pg_stat_statements no longer stores leading comments |
+| D-timeout-param | medium | `p_timeout_ms` has no effect: a 0.2 s EXPLAIN is not stopped at 50 ms (statement_timeout set inside a running statement doesn't re-arm the timer) |
+| D-hypothetical | low | A HypoPG hypothetical index on the same columns in the session makes the drop look free (ratio 1.00) |
+
+Known limitations confirmed (KNOWN):
+
+- An index renamed after its plan was captured is listed as unused. This is critical, because it is the "safe to drop" mistake.
+- The same index name in two schemas: both indexes are credited (flagged `ambiguous`).
+- With no plan source, a query that goes through a view is not a drop-impact candidate.
 
 ## Updating expected output
 

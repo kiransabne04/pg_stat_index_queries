@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- **Index lab** (`sql_edition/validation/lab/`): end-to-end validation on a synthetic workload. It covers 40 cases, 73 indexes and about 100 checks (170 with the native ground-truth checks): attribution against EXPLAIN ground truth (and the native extension where available), unused-index listing, `index_query_stats`, drop impact and error paths. It writes a markdown report with PASS / FAIL / KNOWN, feedback and plan fixtures. It runs on Docker, Aurora (writer + reader phase) and RDS, with simulated RDS mode.
+- `sql_edition/validation/lab/aws/lab-aws.sh`: preflight / up / run / status / down for the Aurora + RDS validation (T05), plus a least-privilege IAM policy. `docs/AURORA-VALIDATION.md` rewritten as a run sheet.
+- Docker lab runs on PG 16–18 found six SQL edition issues, listed in `docs/TESTING.md` (most serious: an index stays hidden in the session after a cancelled `index_drop_impact`, and drop impact fails in read-only transactions). Not fixed yet.
+
 ## 0.4 (2026-10-23): native 0.4, SQL edition pg_index_deps 0.3
 - **New (0.4):** `pg_index_query_stats` view: each (index, query) with what a developer needs to debug it: index definition, size, unique/partial, calls through the index, `pct_calls_using_index`, `other_indexes` the query used, and the query's pg_stat_statements statistics (exec and plan times, rows per call, buffers and cache hit %, temp blocks, I/O time, WAL bytes, roles, query text). pg_stat_statements is looked up when queried, not at install time. Upgrade script 0.3 → 0.4.
 - **New (SQL edition 0.3):** `index_deps.index_query_stats`, the same over captured plans, plus scan types and plan source. Upgrade script 0.2 → 0.3; installers regenerated.

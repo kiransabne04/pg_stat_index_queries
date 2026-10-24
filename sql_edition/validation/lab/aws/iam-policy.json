@@ -1,0 +1,51 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RdsLab",
+      "Effect": "Allow",
+      "Action": [
+        "rds:CreateDBCluster", "rds:DeleteDBCluster", "rds:DescribeDBClusters",
+        "rds:CreateDBInstance", "rds:DeleteDBInstance", "rds:DescribeDBInstances", "rds:RebootDBInstance",
+        "rds:CreateDBClusterParameterGroup", "rds:ModifyDBClusterParameterGroup", "rds:DeleteDBClusterParameterGroup",
+        "rds:CreateDBParameterGroup", "rds:ModifyDBParameterGroup", "rds:DeleteDBParameterGroup",
+        "rds:DescribeDBEngineVersions", "rds:DescribeDBSubnetGroups", "rds:DescribeOrderableDBInstanceOptions",
+        "rds:AddTagsToResource", "rds:ListTagsForResource", "rds:DeleteDBInstanceAutomatedBackup"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NetworkLab",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups", "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeVpcAttribute", "ec2:DescribeAccountAttributes", "ec2:DescribeInternetGateways",
+        "ec2:CreateSecurityGroup", "ec2:AuthorizeSecurityGroupIngress", "ec2:DeleteSecurityGroup", "ec2:CreateTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ManagedMasterPassword",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret", "secretsmanager:TagResource", "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret", "secretsmanager:DeleteSecret", "secretsmanager:RotateSecret",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RdsServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS",
+      "Condition": { "StringLike": { "iam:AWSServiceName": "rds.amazonaws.com" } }
+    },
+    {
+      "Sid": "Identity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    }
+  ]
+}

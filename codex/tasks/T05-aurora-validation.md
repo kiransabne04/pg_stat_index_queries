@@ -4,6 +4,9 @@
 Prove `index_deps` works on Aurora PostgreSQL and lock in a real fixture.
 
 ## Steps
+
+Use the index lab: `sql_edition/validation/lab/aws/lab-aws.sh preflight | up | run | down` (run sheet: `docs/AURORA-VALIDATION.md`). The steps below are what it automates.
+
 1. Smallest Aurora PostgreSQL 16 or 17 cluster in a test account (set a budget alarm; stop it when done). Parameter group: `aurora_compute_plan_id = on`, pg_stat_statements preloaded.
 2. Install `sql_edition/install.sql`; create a synthetic table and run a few indexed queries.
 3. Check `index_deps.resolved_plan_source()` = `aurora_stat_plans` and that `plan_source()` works. If column names differ from the adapter, fix `plan_source()` and note it in DECISIONS.md.

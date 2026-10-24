@@ -8,7 +8,7 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.4 (SQL edition 0.3), experimental.** Tests pass on PostgreSQL 15–18 (Docker; the CI workflow passes when run locally). Overhead hasn't been benchmarked on a proper machine yet and the Aurora path hasn't run on a live cluster. Don't rely on it in production until you've benchmarked it on your hardware.
+> **Status: 0.4 (SQL edition 0.3), experimental.** Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead hasn't been benchmarked on a proper machine yet and the Aurora path hasn't run on a live cluster. The validation lab found open issues in the SQL edition's drop-impact check; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 

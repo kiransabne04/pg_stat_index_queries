@@ -47,6 +47,8 @@ INSERT INTO lab.cases (tag, area, title, match, known_gap) VALUES
  ('W37', 'timeout',   'Query whose planning takes 0.2 s', 'exact', NULL),
  ('W39', 'database',  'Same table/index names queried in another database', 'exact', NULL),
  ('W40', 'replica',   'Workload run only on a reader / replica', 'exact', NULL),
+ ('W41', 'role',      'Lookup through a UNIQUE constraint''s index', 'exact', NULL),
+ ('W42', 'role',      'Overlap search through an EXCLUDE constraint''s index', 'exact', NULL),
  ('W90', 'shape',     'Calls lab.f_customer_refunds() (top-level wrapper of W35)', 'subset', NULL);
 
 \echo '=== workload: statements'
@@ -90,6 +92,8 @@ SELECT tag, kind, stmt FROM (
   UNION ALL SELECT 'W90', 'nested', format('SELECT lab.f_customer_refunds(%s) /* lab:W90 */', g * 907 % 200000 + 1) FROM generate_series(1, 5) g
   UNION ALL SELECT 'W36', 'sql', format('/* app:checkout */ SELECT amount FROM lab.orders WHERE id = %s /* lab:W36 */', g * 1009) FROM generate_series(1, 5) g
   UNION ALL SELECT 'W37', 'sql', format('SELECT id FROM lab.timeout_t WHERE a = %s AND lab.slow_plan() = 1 /* lab:W37 */', g) FROM generate_series(1, 3) g
+  UNION ALL SELECT 'W41', 'sql', format('SELECT id FROM lab.customers WHERE email = %L /* lab:W41 */', 'user' || g * 53 || '@example.com') FROM generate_series(1, 10) g
+  UNION ALL SELECT 'W42', 'sql', format('SELECT count(*) FROM lab.bookings WHERE during && tstzrange(%L, %L) /* lab:W42 */', timestamptz '2026-02-01' + g * interval '1 day', timestamptz '2026-02-01' + g * interval '1 day' + interval '3 hours') FROM generate_series(1, 5) g
   UNION ALL SELECT 'W39', 'other_db', format('SELECT count(*) FROM lab.dbx WHERE v = %s /* lab:W39 */', g) FROM generate_series(1, 5) g
   -- DML last: it touches the visibility map that index-only scans rely on.
   UNION ALL SELECT 'W33', 'sql', format('UPDATE lab.orders SET amount = amount WHERE id = %s /* lab:W33 */', g * 1201) FROM generate_series(1, 5) g
@@ -205,7 +209,8 @@ CREATE INDEX life_recreated_idx ON lab.life (b);
 
 INSERT INTO lab.known_index_gaps VALUES
   ('lab.life_renamed_idx_v2', 'renamed after capture: plans name life_renamed_idx, which no longer exists'),
-  ('lab_b.amb_v_idx', 'same name as lab.amb_v_idx: credited with lab.amb queries (ambiguous)');
+  ('lab_b.amb_v_idx', 'same name as lab.amb_v_idx: credited with lab.amb queries (ambiguous)'),
+  ('lab.life_invalid_idx', 'withheld (conservative): plans on lab.life name life_renamed_idx, which no longer exists');
 
 -- Self-hosted pg_stat_plans flushes lazily (PG 15+ has the flush function).
 SELECT to_regprocedure('pg_stat_force_next_flush()') IS NOT NULL AS has_force_flush \gset

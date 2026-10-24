@@ -259,12 +259,63 @@ SELECT lab.chk_bool('Q-none', 'query_stats', 'No plan source: index_query_stats 
   FROM index_deps.index_query_stats WHERE schemaname IN ('lab', 'lab_b');
 \endif
 
+\echo '=== checks: index roles and index_usage'
+SELECT lab.chk('R-pk', 'roles', 'customers_pkey: primary key referenced by a foreign key', 'medium',
+               'primary key | referenced by foreign key orders_customer_fk on lab.orders',
+               (SELECT index_role || ' | ' || array_to_string(index_notes, ', ') FROM index_deps.index_role('lab.customers_pkey')));
+SELECT lab.chk('R-unique-constraint', 'roles', 'customers_email_key: unique constraint', 'medium',
+               'unique constraint', (SELECT index_role FROM index_deps.index_role('lab.customers_email_key')));
+SELECT lab.chk('R-exclusion', 'roles', 'bookings_no_overlap: exclusion constraint', 'medium',
+               'exclusion constraint', (SELECT index_role FROM index_deps.index_role('lab.bookings_no_overlap')));
+SELECT lab.chk('R-replica-identity', 'roles', 'timeout_id_uq: unique index, replica identity', 'medium',
+               'unique index | replica identity',
+               (SELECT index_role || ' | ' || array_to_string(index_notes, ', ') FROM index_deps.index_role('lab.timeout_id_uq')));
+SELECT lab.chk_bool('R-clustered', 'roles', 'life_pkey is marked clustered', 'low',
+                    'clustered (CLUSTER uses it)' = ANY (index_notes), 'clustered note',
+                    array_to_string(index_notes, ', '))
+  FROM index_deps.index_role('lab.life_pkey');
+SELECT lab.chk_bool('R-partition', 'roles', 'Partition index points to its parent', 'low',
+                    drop_blocker LIKE 'attached to partitioned index lab.events_customer_idx%',
+                    'attached to partitioned index lab.events_customer_idx', drop_blocker)
+  FROM index_deps.index_role('lab.events_2026_03_customer_id_idx');
+SELECT lab.chk_bool('R-dependents-role', 'roles', 'index_dependents shows the role (W41 unique constraint)', 'medium',
+                    bool_and(d.index_role = 'unique constraint'), 'unique constraint',
+                    string_agg(DISTINCT d.index_role, ', '),
+                    CASE WHEN NOT :'has_plans'::boolean THEN 'no plan source: no dependents' END)
+  FROM index_deps.index_dependents d JOIN lab.tag_map() tm USING (queryid)
+ WHERE tm.tag = 'W41';
+
+-- One verdict per index.
+CREATE FUNCTION lab.verdict(p_qualname text) RETURNS text LANGUAGE sql AS $$
+    SELECT verdict FROM index_deps.index_usage WHERE format('%I.%I', schemaname, indexname) = p_qualname
+$$;
+\if :has_plans
+SELECT lab.chk_bool('V-' || q, 'usage', 'index_usage verdict: ' || q, sev,
+                    lab.verdict(q) LIKE pat, pat, lab.verdict(q))
+  FROM (VALUES
+    ('lab.customers_pkey', 'used by %', 'medium'),
+    ('lab.customers_email_key', 'used by %', 'medium'),
+    ('lab.bookings_no_overlap', 'used by %', 'medium'),
+    ('lab.orders_amount_unused_idx', 'no captured query uses it: drop candidate%', 'medium'),
+    ('lab.timeout_id_uq', 'no captured query uses it, but enforces uniqueness%', 'high'),
+    ('lab.events_kind_unused_idx', 'no captured query uses it: drop candidate%', 'medium'),
+    ('lab.events_customer_idx', 'used by %', 'high'),
+    ('lab.life_renamed_idx_v2', 'unknown: plans on this table name life_renamed_idx%', 'critical'),
+    ('lab_b.amb_v_idx', 'used by % (ambiguous name%', 'low')
+  ) v(q, pat, sev);
+\else
+SELECT lab.chk_bool('V-none', 'usage', 'No plan source: every verdict is unknown', 'high',
+                    bool_and(verdict LIKE 'unknown: no plan source%'), 'unknown: no plan source',
+                    string_agg(DISTINCT left(verdict, 40), ' / '))
+  FROM index_deps.index_usage WHERE schemaname IN ('lab', 'lab_b');
+\endif
+
 \echo '=== checks: drop impact'
 \if :can_drop_impact
 CREATE TABLE lab.di (
     target text, tag text, queryid bigint, calls bigint, cost_with float8, cost_without float8,
     cost_ratio numeric, uses_index_now boolean, uses_index_after boolean, plan_changed boolean,
-    shape_without text, note text, query text);
+    shape_without text, note text, query text, drop_blocker text);
 
 CREATE FUNCTION lab.run_di(p_label text, p_index regclass, p_timeout_ms int DEFAULT 2000)
 RETURNS bigint LANGUAGE plpgsql AS $$
@@ -272,7 +323,8 @@ DECLARE n bigint;
 BEGIN
     INSERT INTO lab.di
     SELECT p_label, tm.tag, d.queryid, d.calls, d.cost_with, d.cost_without, d.cost_ratio,
-           d.uses_index_now, d.uses_index_after, d.plan_changed, d.shape_without, d.note, d.query
+           d.uses_index_now, d.uses_index_after, d.plan_changed, d.shape_without, d.note, d.query,
+           d.drop_blocker
       FROM index_deps.index_drop_impact(p_index, p_timeout_ms => p_timeout_ms, p_max_queries => 100) d
       LEFT JOIN lab.tag_map() tm ON tm.queryid = d.queryid;
     GET DIAGNOSTICS n = ROW_COUNT;
@@ -300,7 +352,7 @@ LANGUAGE sql AS $$
     SELECT * FROM lab.di d WHERE d.target = p_target AND d.tag = p_tag
     UNION ALL
     SELECT p_target, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-           '(no row for ' || p_tag || ')', NULL
+           '(no row for ' || p_tag || ')', NULL, NULL
      WHERE NOT EXISTS (SELECT 1 FROM lab.di d WHERE d.target = p_target AND d.tag = p_tag)
     LIMIT 1
 $$;
@@ -376,18 +428,24 @@ SELECT lab.chk_bool('D-knn', 'drop_impact', 'W07 GiST KNN: generic plan uses the
 SELECT * FROM hypopg_create_index('CREATE INDEX ON lab.order_items (product_id)');
 SELECT lab.run_di('with_hypothetical_twin', 'lab.order_items_product_idx');
 SELECT hypopg_reset();
-SELECT lab.chk_bool('D-hypothetical', 'drop_impact', 'Result not distorted by a hypothetical index in the session', 'low',
-                    r.cost_ratio > 5,
-                    'ratio > 5 (or a warning)', format('ratio %s, shape_without %s, note %s', r.cost_ratio, r.shape_without, r.note))
+SELECT lab.chk_bool('D-hypothetical', 'drop_impact', 'Hypothetical index in the session: real result or a warning', 'low',
+                    r.cost_ratio > 5 OR r.note LIKE '%hypothetical HypoPG index%',
+                    'ratio > 5 or a warning', format('ratio %s, shape_without %s, note %s', r.cost_ratio, r.shape_without, r.note))
   FROM lab.di_row('with_hypothetical_twin', 'W11') r;
 
--- p_timeout_ms: planning W37 takes 0.2 s per EXPLAIN.
-SELECT lab.run_di('timeout_50ms', 'lab.timeout_a_idx', 50);
-SELECT lab.chk_bool('D-timeout-param', 'drop_impact', 'p_timeout_ms => 50 stops a 0.2 s EXPLAIN', 'medium',
-                    r.note LIKE '%statement timeout%',
-                    'skipped: canceling statement due to statement timeout',
-                    coalesce(r.note, '(no row for W37)'))
-  FROM lab.di_row('timeout_50ms', 'W37') r;
+-- p_timeout_ms is a time budget for the whole call (0.4+): with 1 ms only
+-- the first candidates are evaluated, the rest reported as skipped.
+SELECT lab.run_di('budget_1ms', 'lab.orders_amount_unused_idx', 1);
+SELECT lab.chk_bool('D-timeout-param', 'drop_impact', 'p_timeout_ms budget: later queries skipped once used up', 'medium',
+                    count(*) FILTER (WHERE note LIKE 'skipped: time budget used up%') > 0,
+                    'some rows skipped: time budget used up',
+                    format('%s rows, %s skipped by budget', count(*), count(*) FILTER (WHERE note LIKE 'skipped: time budget used up%')))
+  FROM lab.di WHERE target = 'budget_1ms';
+
+SELECT lab.chk_bool('D-blocker-pk', 'drop_impact', 'drop_blocker explains the primary key', 'medium',
+                    r.drop_blocker LIKE 'enforces primary key orders_pkey%',
+                    'enforces primary key orders_pkey ...', coalesce(r.drop_blocker, '(null)'))
+  FROM lab.di_row('orders_pkey', 'W21') r;
 
 -- Cancel the whole call while the index is hidden: time one full call
 -- (candidates, EXPLAIN 0.2 s, hide, EXPLAIN 0.2 s), then cancel the next

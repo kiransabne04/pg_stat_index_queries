@@ -32,6 +32,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.3 → 0.4:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.4';` (adds `pg_index_query_stats`; SQL only, no restart). The view needs pg_stat_statements when you query it.
 
+**Upgrading 0.4 → 0.5:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.5';` (adds `pg_index_role()` and `pg_index_usage`; `pg_index_dependents` gains `index_role`; `pg_index_query_stats` gains `index_role` and `index_notes` after `is_partial`, so `SELECT *` column positions change). SQL only, no restart.
+
 ## 2. Self-hosted, SQL edition (optional)
 
 Needs pg_stat_plans (PG 16+) for plan capture and HypoPG for the drop-impact check.
@@ -73,6 +75,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
    \i sql_edition/install_pg_tle.sql
    CREATE EXTENSION pg_index_deps;
    ```
+   Upgrading to SQL edition 0.4 changes `index_drop_impact`: new last column `drop_blocker`, and `p_timeout_ms` is now a budget for the whole call (default 30000) instead of a per-query timeout that never took effect.
    To upgrade a pg_tle install later, run the newer `install_pg_tle.sql` (it registers the missing update paths and the new default version) and then `ALTER EXTENSION pg_index_deps UPDATE;`.
    The plain install has no upgrade path: `DROP SCHEMA index_deps CASCADE;`, run the newer `install.sql`, and set `plan_source` again if you had changed it.
 4. Grant read access to whoever investigates: `GRANT pg_read_all_stats TO analyst;` (to see all statements and plans).

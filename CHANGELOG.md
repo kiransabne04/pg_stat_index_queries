@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- **Native 0.5** (upgrade script 0.4 → 0.5; tests pass on PG 15–18, TAP included): `pg_index_role(regclass)` (role, notes, drop blocker, same as the SQL edition), `pg_index_usage` (one row per index with a verdict; "unknown" when entries were evicted), `index_role` column in `pg_index_dependents`, and `index_role` and `index_notes` in `pg_index_query_stats`. A new upgrade test checks that the upgraded objects are identical to a fresh install (in both editions).
+- **Index lab:** new cases for a UNIQUE constraint lookup (W41) and an EXCLUDE constraint (W42), plus role and verdict checks. After the fixes, Docker PG 16–18: 0 FAIL in both modes; the reader rehearsal runs drop impact without error.
 - **SQL edition 0.4** (upgrade script 0.3 → 0.4; installers regenerated; regression tests pass on PG 16–18):
   - **Fix:** if `index_drop_impact` was cancelled (statement_timeout, pg_cancel_backend) while the index was hidden, the index stayed hidden for the rest of the session. It is now unhidden on cancel, and the error is re-raised.
   - **Fix:** `index_drop_impact` now works in read-only transactions (Aurora readers, hot standbys); the temp table is gone.

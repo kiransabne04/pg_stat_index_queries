@@ -63,7 +63,7 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 | Native build + regression + TAP on macOS arm64, Homebrew PG 17.11 (clang 21, `-Werror`) | Pass |
 | CI workflow, all 7 jobs (native 15–18, sql-edition 16–18) | Pass locally via `scripts/ci-local.sh` (ubuntu:24.04, linux/amd64, PGDG), and on GitHub Actions (run 39908116705, 23 Oct 2026, commit 9e6c2ac) |
 | `aurora_stat_plans` adapter | **Not yet run on Aurora**: column names taken from AWS docs |
-| Index lab (`sql_edition/validation/lab/`) | Docker PG 16–18, both modes, 24 Oct 2026: see below. Aurora/RDS pending |
+| Index lab (`sql_edition/validation/lab/`) | Docker PG 16–18, both modes, 24 Oct 2026: 0 FAIL after SQL edition 0.4 (see below). Aurora/RDS pending |
 | `sql_edition/validation/managed_check.sql` (T05 smoke test) | Dry-run on PG 17 playground: self-hosted path and RDS path (`-v simulate_rds=1`). Aurora/RDS runs pending, see [AURORA-VALIDATION.md](AURORA-VALIDATION.md) |
 | `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk. 0.2 (22 Oct, pg_tle 6340fd2, PG 16): fresh install; upgrade of a 0.1 pg_tle install via the new file + `ALTER EXTENSION UPDATE` (config kept); file rerun is harmless |
 | Drop-impact fallback with no plan source (RDS-like) | Verified: candidates from query text, index use before/after correct |
@@ -71,41 +71,36 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 
 ## Index lab (Docker, 24 Oct 2026)
 
-`sql_edition/validation/lab/run.sh` against the Docker playground image (arm64, pg_stat_plans 2.1, HypoPG 1.4.3, native 0.4 as ground truth, scale 1: ~3.8M rows, 73 indexes; ~12 s per run). "rds" = `--simulate-rds` (plan_source = none). Counts include the native ground-truth rows.
+Command: `sql_edition/validation/lab/run.sh`, run against the Docker playground image.
+- Image: arm64, pg_stat_plans 2.1, HypoPG 1.4.3, with the native extension as ground truth.
+- Scale 1: about 3.8M rows and 76 indexes. Each run takes about 12 s.
+- "rds" means `--simulate-rds` (plan_source = none).
+- Counts include the native ground-truth rows.
+
+**After the fixes** (SQL edition 0.4, native 0.5):
 
 | Run | PASS | FAIL | KNOWN |
 |---|---|---|---|
-| PG 16.15 | 159 | 6 | 5 |
-| PG 16.15 rds | 88 | 6 | 2 |
-| PG 17.11 | 159 | 6 | 5 |
-| PG 17.11 rds | 88 | 6 | 2 |
-| PG 18.6 | 160 | 5 | 5 |
-| PG 18.6 rds | 88 | 5 | 2 |
+| PG 16.15 / 17.11 / 18.6 | 186 | 0 | 5 |
+| PG 16.15 / 17.11 / 18.6, rds | 104 | 0 | 3 |
 
-What passed everywhere:
+- **Reader rehearsal** (`--reader` with `default_transaction_read_only=on`): W40 is attributed on that instance, and `index_drop_impact` runs without error.
+- **KNOWN rows**, all limitations that behave as documented:
+  - The same index name in two schemas: both indexes are credited, and the row is flagged `ambiguous`.
+  - An index renamed after its plan was captured gets no queries attributed. It is no longer listed as unused, and its verdict is "unknown". The same holds for the table's other unused index (life_invalid_idx).
+  - Native: an index recreated after the workload has a new OID, so it has no recorded use yet.
+  - rds only: a query that goes through a view isn't a drop-impact candidate, and there are no dependents to show a role for.
 
-- Attribution matches EXPLAIN for 36 of the 38 cases (the two exceptions are known limitations, below). This covers every scan type and index type, partitions, names that need quoting, PREPARE, DML, views and nested statements (with `track = all`).
-- No index that was used is listed as unused (other than the renamed one, below).
-- The partial-index, typed-literal, duplicate-index and composite-fallback drop-impact cases give the expected result.
-- All error paths give a clear message.
-- The native extension agrees with EXPLAIN on every case except where it is designed to differ: a recreated index has a new OID.
+**Before the fixes** (SQL edition 0.3, first lab run): 6 FAIL per run. All are fixed in SQL edition 0.4, and each now has a regression test.
 
-Failures found (open, to be fixed in SQL edition 0.4):
-
-| Case | Severity | Finding |
+| Case | Severity | Finding (fixed) |
 |---|---|---|
-| D-cancel-unhide | critical | If `index_drop_impact` is cancelled (statement_timeout, pg_cancel_backend) while the index is hidden, it stays hidden for the rest of the session, and that connection's real queries stop using it. `WHEN OTHERS` does not catch `query_canceled` |
-| D-read-only | high | `index_drop_impact` fails in a read-only transaction (`cannot execute CREATE TABLE`), so it can't run on an Aurora reader or hot standby. Cause: the candidates temp table |
-| E-unprivileged | high | A role without superuser gets `permission denied for table config` from every view; `index_deps.config` has no SELECT grant |
-| D-leading-comment | medium | PG 16/17: a query whose text starts with a comment is skipped as "not a read query". PG 18 passes, because pg_stat_statements no longer stores leading comments |
-| D-timeout-param | medium | `p_timeout_ms` has no effect: a 0.2 s EXPLAIN is not stopped at 50 ms (statement_timeout set inside a running statement doesn't re-arm the timer) |
-| D-hypothetical | low | A HypoPG hypothetical index on the same columns in the session makes the drop look free (ratio 1.00) |
-
-Known limitations confirmed (KNOWN):
-
-- An index renamed after its plan was captured is listed as unused. This is critical, because it is the "safe to drop" mistake.
-- The same index name in two schemas: both indexes are credited (flagged `ambiguous`).
-- With no plan source, a query that goes through a view is not a drop-impact candidate.
+| D-cancel-unhide | critical | If `index_drop_impact` was cancelled while the index was hidden, the index stayed hidden for the rest of the session |
+| D-read-only | high | Failed in read-only transactions (temp table), so it could not run on Aurora readers |
+| E-unprivileged | high | Roles without superuser got `permission denied for table config` |
+| D-leading-comment | medium | PG 16/17: a query starting with a comment was skipped as "not a read query" |
+| D-timeout-param | medium | `p_timeout_ms` had no effect |
+| D-hypothetical | low | A hypothetical HypoPG twin index made the drop look free, with no warning |
 
 ## Updating expected output
 

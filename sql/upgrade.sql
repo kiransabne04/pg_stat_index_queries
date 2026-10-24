@@ -15,3 +15,34 @@ SELECT to_regclass('pg_index_query_stats') IS NULL AS query_stats_absent_in_0_3;
 ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.4';
 SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
 SELECT to_regclass('pg_index_query_stats') IS NOT NULL AS query_stats_present_in_0_4;
+-- 0.4 -> 0.5: pg_index_role, pg_index_usage; role columns.
+SELECT to_regclass('pg_index_usage') IS NULL AS usage_absent_in_0_4;
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.5';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+SELECT to_regclass('pg_index_usage') IS NOT NULL AS usage_present_in_0_5;
+-- The upgraded objects must be identical to a fresh 0.5 install.
+CREATE TEMP TABLE defs_upgraded AS
+SELECT CASE d.classid WHEN 'pg_proc'::regclass THEN 'function ' || d.objid::regprocedure::text
+                      ELSE 'view ' || d.objid::regclass::text END AS name,
+       CASE d.classid WHEN 'pg_proc'::regclass THEN pg_get_functiondef(d.objid)
+                      ELSE pg_get_viewdef(d.objid) END AS def
+  FROM pg_depend d
+ WHERE d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+   AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'pg_stat_index_queries')
+   AND (d.classid = 'pg_proc'::regclass
+        OR (d.classid = 'pg_class'::regclass AND (SELECT relkind FROM pg_class WHERE oid = d.objid) = 'v'));
+DROP EXTENSION pg_stat_index_queries;
+CREATE EXTENSION pg_stat_index_queries;
+SELECT name AS differs_from_fresh_install
+  FROM (SELECT CASE d.classid WHEN 'pg_proc'::regclass THEN 'function ' || d.objid::regprocedure::text
+                              ELSE 'view ' || d.objid::regclass::text END AS name,
+               CASE d.classid WHEN 'pg_proc'::regclass THEN pg_get_functiondef(d.objid)
+                              ELSE pg_get_viewdef(d.objid) END AS def
+          FROM pg_depend d
+         WHERE d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+           AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'pg_stat_index_queries')
+           AND (d.classid = 'pg_proc'::regclass
+                OR (d.classid = 'pg_class'::regclass AND (SELECT relkind FROM pg_class WHERE oid = d.objid) = 'v'))) fresh
+  FULL JOIN defs_upgraded USING (name)
+ WHERE fresh.def IS DISTINCT FROM defs_upgraded.def
+ ORDER BY 1;

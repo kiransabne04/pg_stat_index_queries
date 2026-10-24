@@ -229,6 +229,13 @@ INSERT INTO lab.life SELECT g, g % 5000, g % 5000, g % 100 FROM generate_series(
 CREATE TABLE lab.reader_only (id int PRIMARY KEY, v int);
 INSERT INTO lab.reader_only SELECT g, g % 2000 FROM generate_series(1, 20000) g;
 
+CREATE TABLE lab.bookings (id int PRIMARY KEY, room int NOT NULL, during tstzrange NOT NULL,
+                           CONSTRAINT bookings_no_overlap EXCLUDE USING gist (during WITH &&));
+INSERT INTO lab.bookings
+SELECT g, g % 50, tstzrange(timestamptz '2026-01-01' + g * interval '2 hours',
+                            timestamptz '2026-01-01' + g * interval '2 hours' + interval '1 hour')
+  FROM generate_series(1, 20000) g;
+
 CREATE TABLE lab.timeout_t (id int PRIMARY KEY, a int);
 INSERT INTO lab.timeout_t SELECT g, g % 2000 FROM generate_series(1, 20000) g;
 
@@ -292,6 +299,10 @@ CREATE INDEX life_renamed_idx ON lab.life (a);
 CREATE INDEX life_recreated_idx ON lab.life (b);
 CREATE INDEX reader_only_idx ON lab.reader_only (v);
 CREATE INDEX timeout_a_idx ON lab.timeout_t (a);
+-- Unique index (no constraint) used as replica identity; clustered index.
+CREATE UNIQUE INDEX timeout_id_uq ON lab.timeout_t (id);
+ALTER TABLE lab.timeout_t REPLICA IDENTITY USING INDEX timeout_id_uq;
+ALTER TABLE lab.life CLUSTER ON life_pkey;
 
 -- An invalid index, as left behind by a failed CREATE INDEX CONCURRENTLY.
 \echo 'expected error next (division by zero) leaves life_invalid_idx invalid:'
@@ -302,7 +313,7 @@ CREATE INDEX CONCURRENTLY life_invalid_idx ON lab.life ((100 / (c - 50)));
 \echo '=== seed: vacuum analyze'
 VACUUM ANALYZE lab.customers, lab.products, lab.orders, lab.order_items, lab.events,
                lab."Mixed Case Tbl", lab.amb, lab_b.amb, lab.dbx, lab.life,
-               lab.reader_only, lab.timeout_t;
+               lab.reader_only, lab.timeout_t, lab.bookings;
 
 SELECT count(*) AS lab_indexes,
        pg_size_pretty(sum(pg_relation_size(c.oid))) AS index_size

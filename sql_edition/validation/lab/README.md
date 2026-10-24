@@ -25,8 +25,8 @@ To create and delete the AWS resources, use `aws/lab-aws.sh`. It has the subcomm
 
 ## What it does
 
-1. **Seed** (`seed.sql`): about 3.8M synthetic rows at `--scale 1`, deterministic (`setseed`). The tables are customers, products, orders, order_items, events (12 monthly partitions), and small tables for naming, lifecycle and timeout cases. There are 73 indexes: btree, expression, partial with and without a constant, GIN jsonb, GIN trigram, BRIN, GiST, hash, INCLUDE, a duplicate pair, a prefix overlap, a partitioned index, mixed-case, spaces, non-ASCII and truncated names, the same name in two schemas, and an invalid index.
-2. **Workload** (`workload.sql`): 40 cases. Every statement carries a `/* lab:Wnn */` comment so its pg_stat_statements entry maps back to its case.
+1. **Seed** (`seed.sql`): about 3.8M synthetic rows at `--scale 1`, deterministic (`setseed`). The tables are customers, products, orders, order_items, events (12 monthly partitions), and small tables for naming, lifecycle and timeout cases. There are 76 indexes: primary keys, unique and exclusion constraints, a replica-identity unique index, btree, expression, partial with and without a constant, GIN jsonb, GIN trigram, BRIN, GiST, hash, INCLUDE, a duplicate pair, a prefix overlap, a partitioned index, mixed-case, spaces, non-ASCII and truncated names, the same name in two schemas, and an invalid index.
+2. **Workload** (`workload.sql`): 42 cases. Every statement carries a `/* lab:Wnn */` comment so its pg_stat_statements entry maps back to its case.
    - Scan types: index, index-only, bitmap, BitmapOr, backward, nested-loop inner.
    - Query shapes: CTE, LATERAL, UNION, IN/ANY, view, PREPARE/EXECUTE, DML, leading comment.
    - Other cases: plan flips on skewed data, partition pruning, a nested PL/pgSQL statement, a second database, a reader-only workload, and a query whose planning takes 0.2 s.
@@ -35,6 +35,7 @@ To create and delete the AWS resources, use `aws/lab-aws.sh`. It has the subcomm
 5. **Checks** (`checks.sql`):
    - attribution per case: ground truth vs `index_dependents` vs native;
    - `index_no_dependents` per index: a used index listed as unused is critical;
+   - index roles (`index_role`) and per-index verdicts (`index_usage`);
    - `index_query_stats`;
    - drop impact: only index, unused, partial with and without a constant, duplicate, composite fallback, PREPARE, DML, leading comment, view, KNN, a hypothetical index present, `p_timeout_ms`, cancellation while an index is hidden, read-only transaction;
    - error paths: not an index, missing index, no HypoPG, no pg_stat_statements, bad plan source, unprivileged role.

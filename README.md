@@ -8,7 +8,7 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.4 (SQL edition 0.3), experimental.** Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead hasn't been benchmarked on a proper machine yet and the Aurora path hasn't run on a live cluster. The validation lab found open issues in the SQL edition's drop-impact check; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
+> **Status: 0.5 (SQL edition 0.4), experimental.** Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead hasn't been benchmarked on a proper machine yet and the Aurora path hasn't run on a live cluster. The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 
@@ -70,9 +70,11 @@ SELECT * FROM index_deps.index_drop_impact('public.my_idx');
 | Object | What it gives you |
 |---|---|
 | `pg_stat_index_queries` | Raw counters: dbid, indexrelid, queryid, toplevel, calls_executed, calls_planned, first_seen, last_seen |
-| `pg_index_dependents` | Same, with schema, table and index names, current database |
+| `pg_index_dependents` | Same, with schema, table and index names, current database, and `index_role` |
+| `pg_index_usage` | One row per index (partitions folded into the parent): `index_role`, `index_notes`, `drop_blocker`, queries and calls since `tracked_since`, and a `verdict` (used / drop candidate / no use but needed, e.g. enforces a primary key / invalid / unknown after evictions) |
+| `pg_index_role(index)` | What an index is for besides speed: `index_role` (primary key, unique constraint, exclusion constraint, unique index, index), `index_notes` (referenced by foreign keys, replica identity, clustered, invalid, partial, expression, partition) and `drop_blocker` (why DROP INDEX fails or changes behaviour) |
 | `pg_index_dependents_rollup` | Partition indexes rolled up to the partitioned (parent) index |
-| `pg_index_query_stats` | For debugging: each (index, query) with the index definition, size, unique/partial flags, calls through the index and `pct_calls_using_index`, `other_indexes` the query used, and the query's pg_stat_statements stats (calls, total/mean/min/max exec ms, plans and plan ms, rows and rows per call, shared buffers hit/read/dirtied/written, `cache_hit_pct`, temp blocks, I/O ms, WAL bytes, roles, query text). Stats summed over roles; NULL when pg_stat_statements no longer has the query. Needs pg_stat_statements when queried, not to install |
+| `pg_index_query_stats` | For debugging: each (index, query) with the index definition, size, unique/partial flags, `index_role` and `index_notes`, calls through the index and `pct_calls_using_index`, `other_indexes` the query used, and the query's pg_stat_statements stats (calls, total/mean/min/max exec ms, plans and plan ms, rows and rows per call, shared buffers hit/read/dirtied/written, `cache_hit_pct`, temp blocks, I/O ms, WAL bytes, roles, query text). Stats summed over roles; NULL when pg_stat_statements no longer has the query. Needs pg_stat_statements when queried, not to install |
 | `pg_index_no_dependents` | User indexes with no executed use since `tracked_since` (excludes PK, unique, constraint indexes). Partitioned tables: one row per parent index, unused only if no partition index was used; size is the whole tree |
 | `pg_stat_index_queries_info` | Entries, evictions (`dealloc`), `stats_reset` |
 | `pg_stat_index_queries_reset()` | Clear counters (superuser by default) |
@@ -82,10 +84,13 @@ SELECT * FROM index_deps.index_drop_impact('public.my_idx');
 | Object | What it gives you |
 |---|---|
 | `plan_index_usage` | Every index reference found in captured plans |
-| `index_dependents` | Per index and query: plans, calls, scan types, `ambiguous` flag |
+| `index_dependents` | Per index and query: plans, calls, scan types, `ambiguous` flag, `index_role` |
+| `index_usage` | One row per index: role, notes, `drop_blocker`, queries and calls from captured plans, and a `verdict` (like the native `pg_index_usage`; `unknown` when there is no plan source or when plans on the table name an index that no longer exists) |
+| `index_role(index)` | Same as the native `pg_index_role` |
+| `unresolved_plan_indexes` | Index names in captured plans that no longer exist (renamed or dropped) |
 | `index_query_stats` | Same as the native `pg_index_query_stats`, with `index_plans`, `index_calls`, `scan_types`, `ambiguous` and `source` from the captured plans (stats also summed over top-level and nested) |
-| `index_no_dependents` | Indexes no captured plan mentions (partition-aware like the native view). Empty when there is no plan source (`none`, e.g. RDS) |
-| `index_drop_impact(index)` | Cost and plan change per dependent query if the index were gone |
+| `index_no_dependents` | Indexes no captured plan mentions (partition-aware like the native view). Leaves out tables whose plans name a missing (renamed?) index. Empty when there is no plan source (`none`, e.g. RDS) |
+| `index_drop_impact(index)` | Cost and plan change per dependent query if the index were gone, plus `drop_blocker`. Works in read-only transactions (Aurora readers); `p_timeout_ms` is a time budget for the whole call |
 | `config` | `plan_source`: auto, aurora_stat_plans, pg_stat_plans, none |
 
 ## Settings (native)

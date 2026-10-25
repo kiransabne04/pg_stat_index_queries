@@ -31,7 +31,7 @@ SELECT pad FROM t WHERE id = 42;
  xxxxxxxxxxxxxxxxxxxx
 (1 row)
 
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
  indexname | toplevel | calls_executed | calls_planned 
 -----------+----------+----------------+---------------
  t_pkey    | t        |              1 |             1
@@ -52,7 +52,7 @@ SELECT id FROM t WHERE id BETWEEN 10 AND 12;
  12
 (3 rows)
 
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
  indexname | toplevel | calls_executed | calls_planned 
 -----------+----------+----------------+---------------
  t_pkey    | t        |              1 |             1
@@ -73,7 +73,7 @@ SELECT count(*) FROM t WHERE a = 1 OR b = 2;
 (1 row)
 
 RESET enable_indexscan;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
  indexname | toplevel | calls_executed | calls_planned 
 -----------+----------+----------------+---------------
  t_a_idx   | t        |              1 |             1
@@ -92,7 +92,7 @@ SELECT pad FROM t WHERE id = 7 AND (SELECT false);
 -----
 (0 rows)
 
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
  indexname | toplevel | calls_executed | calls_planned 
 -----------+----------+----------------+---------------
  t_pkey    | t        |              0 |             1
@@ -133,7 +133,7 @@ EXECUTE p(1); EXECUTE p(2); EXECUTE p(3); EXECUTE p(4); EXECUTE p(5);
 (1 row)
 
 DEALLOCATE p;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
  indexname | toplevel | calls_executed | calls_planned 
 -----------+----------+----------------+---------------
  t_pkey    | t        |              5 |             5
@@ -154,14 +154,14 @@ SELECT pg_stat_index_queries_reset();
 (1 row)
 
 DO $$ BEGIN PERFORM pad FROM t WHERE a = 3; END $$;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
  indexname | toplevel | calls_executed | calls_planned 
 -----------+----------+----------------+---------------
 (0 rows)
 
 SET pg_stat_index_queries.track = 'all';
 DO $$ BEGIN PERFORM pad FROM t WHERE a = 3; END $$;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
  indexname | toplevel | calls_executed | calls_planned 
 -----------+----------+----------------+---------------
  t_a_idx   | f        |              1 |             1

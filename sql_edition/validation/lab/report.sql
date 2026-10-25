@@ -105,7 +105,8 @@ SELECT concat_ws(E'\n',
 \pset format aligned
 \pset tuples_only off
 \o results.csv
-COPY (SELECT * FROM lab.results ORDER BY ord) TO STDOUT WITH (FORMAT csv, HEADER);
+COPY (SELECT ord, case_id, area, title, severity, status, expected, actual, detail
+        FROM lab.results ORDER BY ord) TO STDOUT WITH (FORMAT csv, HEADER);
 \o
 
 -- Plan fixtures for the lab's statements (to add real plan text to the tests).

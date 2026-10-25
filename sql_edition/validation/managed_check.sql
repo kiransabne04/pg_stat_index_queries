@@ -73,7 +73,11 @@ SELECT index_deps.resolved_plan_source() AS resolved_plan_source;
 
 \if :has_aurora_stat_plans
 \echo '=== 3. aurora_stat_plans columns (compare with index_deps.plan_source())'
-SELECT * FROM aurora_stat_plans(true) LIMIT 0 \gdesc
+SELECT a.name AS column_name, a.type::regtype AS type
+  FROM pg_proc p,
+       unnest(p.proargnames, p.proallargtypes, p.proargmodes) AS a(name, type, mode)
+ WHERE p.oid = 'aurora_stat_plans(boolean)'::regprocedure AND a.mode IN ('o', 't')
+ ORDER BY 1;
 \endif
 
 \echo '=== 4. Synthetic schema and workload'

@@ -9,7 +9,7 @@
 | SQL edition 0.4 | Validate on a live Aurora cluster; real `aurora_stat_plans` fixture in tests | Runs on Aurora |
 | 0.5 | `pg_index_sole_path` view (queries with no other recorded index on the table) | Someone asks for it |
 | 0.5 | Index column usage per query (T07) | After benchmarks |
-| 0.6 | Sampling GUC (T04) | Next: benchmarks showed ~3% on read-only workloads |
+| 0.6 | Backend-local batching + sampling GUC (T04) | Done 25 Oct 2026; benchmark rerun pending |
 | later | PGXN release, PGDG packaging request | Outside users exist |
 
 Stop rule: if 8 weeks after the public release there are no outside users, issues or mentions, stop adding features and keep it as private audit tooling.

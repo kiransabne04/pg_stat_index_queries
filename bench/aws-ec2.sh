@@ -9,7 +9,8 @@
 #   bench/aws-ec2.sh down    # terminate instance, delete SG and key pair
 #
 # Settings: AWS_PROFILE / AWS_REGION, BENCH_TYPE (default c7gd.xlarge: 4
-# Graviton3 vCPU, non-burstable, local NVMe), BENCH_PG (default 17).
+# Graviton3 vCPU, non-burstable, local NVMe), BENCH_PG (default 17),
+# BENCH_ARGS (bench/run.sh arguments, default --wide), BENCH_LABEL_SUFFIX.
 # The private key goes to ~/.ssh/pgsiq-bench.pem (mode 600) and is deleted by down.
 set -euo pipefail
 
@@ -97,7 +98,7 @@ run() {
   log "start bench (background; ~1.5 h)"
   note="$(ssh_ -n "lscpu | awk -F: '/Model name|^CPU\\(s\\)/ {gsub(/^ +/,\"\",\$2); printf \"%s; \", \$2}'; free -g | awk '/Mem:/ {printf \"%s GB RAM; \", \$2}'; lsblk -dno MODEL /dev/nvme1n1 2>/dev/null | tr -d '\\n'; echo '; '; uname -r")"
   ssh_ -n "nohup bash -c 'cd ~/src && export TMPDIR=\$( [ -d /mnt/nvme ] && echo /mnt/nvme || echo /tmp ) PG_CONFIG=/usr/lib/postgresql/$PGV/bin/pg_config PATH=/usr/lib/postgresql/$PGV/bin:\$PATH && \
-        ./bench/run.sh --wide --label aws-$TYPE-pg$PGV --note \"AWS $TYPE ap-southeast-2, data on local NVMe; $note\"' > ~/bench.log 2>&1 < /dev/null & echo started"
+        ./bench/run.sh ${BENCH_ARGS:---wide} --label aws-$TYPE-pg$PGV${BENCH_LABEL_SUFFIX:-} --note \"AWS $TYPE ap-southeast-2, data on local NVMe; $note\"' > ~/bench.log 2>&1 < /dev/null & echo started"
 }
 
 status() { ssh_ -n 'tail -5 ~/bench.log; ls ~/src/bench/results/'; }

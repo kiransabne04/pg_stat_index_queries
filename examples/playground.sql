@@ -57,7 +57,8 @@ SELECT format('CREATE TABLE orders_by_month_%s PARTITION OF orders_by_month
               to_char(m, 'YYYY_MM'), m, m + interval '1 month')
   FROM generate_series(timestamptz '2026-01-01', '2026-09-01', interval '1 month') m
 \gexec
-INSERT INTO orders_by_month SELECT * FROM orders;
+INSERT INTO orders_by_month (id, customer_id, status, region, amount, created_at)
+SELECT id, customer_id, status, region, amount, created_at FROM orders;
 CREATE INDEX orders_by_month_customer_idx ON orders_by_month (customer_id);
 CREATE INDEX orders_by_month_region_idx   ON orders_by_month (region);  -- unused
 
@@ -75,7 +76,7 @@ SELECT pg_stat_plans_reset() IS NOT NULL AS plans_reset;
 SELECT setseed(0.7);
 \o /dev/null
 -- Point lookups by primary key.
-SELECT format('SELECT * FROM orders WHERE id = %s', 1 + (random() * 99999)::int)
+SELECT format('SELECT id, customer_id, status, amount FROM orders WHERE id = %s', 1 + (random() * 99999)::int)
   FROM generate_series(1, 300) \gexec
 -- Orders of one customer.
 SELECT format('SELECT id, amount FROM orders WHERE customer_id = %s ORDER BY id',
@@ -120,7 +121,7 @@ SELECT pg_stat_force_next_flush();
 -- ---------------------------------------------------------------------------
 \echo
 \echo '=== pg_stat_index_queries_info'
-SELECT * FROM pg_stat_index_queries_info;
+SELECT entries, dealloc, stats_reset FROM pg_stat_index_queries_info;
 
 \echo
 \echo '=== pg_index_dependents (native): which queries use each index'

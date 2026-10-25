@@ -38,8 +38,8 @@ compute_query_id = on
 ```sql
 CREATE EXTENSION pg_stat_index_queries;
 -- ... let the workload run (include month-end jobs!) ...
-SELECT * FROM pg_index_no_dependents;          -- candidates to drop, with tracked_since
-SELECT * FROM pg_index_dependents WHERE indexname = 'my_idx';
+SELECT indexname, index_role, queries, verdict FROM pg_index_usage ORDER BY verdict;  -- one verdict per index
+SELECT queryid, calls_executed, last_seen FROM pg_index_dependents WHERE indexname = 'my_idx';
 -- debugging: each (index, query) with timing, rows, buffers and query text
 SELECT indexname, other_indexes, calls, mean_exec_ms, rows_per_call, cache_hit_pct, query
   FROM pg_index_query_stats WHERE tablename = 'orders' ORDER BY total_exec_ms DESC;
@@ -56,9 +56,10 @@ See [docs/INSTALL.md](docs/INSTALL.md) for step-by-step instructions. In short:
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 CREATE EXTENSION IF NOT EXISTS hypopg;          -- for the drop-impact check
 \i sql_edition/install.sql                        -- or install_pg_tle.sql
-SELECT * FROM index_deps.index_dependents WHERE indexname = 'my_idx';
-SELECT * FROM index_deps.index_query_stats WHERE indexname = 'my_idx';
-SELECT * FROM index_deps.index_drop_impact('public.my_idx');
+SELECT indexname, index_role, queries, verdict FROM index_deps.index_usage;
+SELECT queryid, calls, scan_types, index_role FROM index_deps.index_dependents WHERE indexname = 'my_idx';
+SELECT queryid, calls, mean_exec_ms, rows_per_call, query FROM index_deps.index_query_stats WHERE indexname = 'my_idx';
+SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.index_drop_impact('public.my_idx');
 ```
 
 `index_drop_impact` hides the index **for your session only** (HypoPG), re-plans each dependent query with `EXPLAIN (GENERIC_PLAN)` and reports cost before and after, and whether the plan changes. It never executes a query and never drops anything.
@@ -101,6 +102,8 @@ SELECT * FROM index_deps.index_drop_impact('public.my_idx');
 | `pg_stat_index_queries.track` | `top` | `top`, `all` (include statements inside functions), `none` |
 | `pg_stat_index_queries.track_catalog` | off | Also track system catalog indexes |
 | `pg_stat_index_queries.save` | on | Keep counters across clean restarts (lost on crash) |
+| `pg_stat_index_queries.flush_interval` | 1s | Each session counts in its own memory and moves the counts to shared memory this often (and when it disconnects). Other sessions see them up to this late; a session always sees its own. `0` = after every statement (0.5 behaviour, slower) |
+| `pg_stat_index_queries.sample_rate` | 1.0 | Fraction of statements recorded; counts are scaled up. Below 1, counts are estimates and `pg_index_usage` reports unused indexes as "unknown" (a rarely used index can be missed) |
 
 ## Overhead
 

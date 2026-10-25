@@ -171,7 +171,8 @@ SELECT p.queryid, p.planid, p.calls,
 ### B5. Drop-impact check (SQL, PG 16+ with HypoPG)
 
 ```sql
-SELECT * FROM siq.index_drop_impact('public.orders_customer_id_idx'::regclass);
+SELECT queryid, calls, cost_with, cost_without, cost_ratio, plan_changed, uses_index_after, note
+  FROM siq.index_drop_impact('public.orders_customer_id_idx'::regclass);
 -- queryid | calls | cost_with | cost_without | ratio | plan_changed | uses_index_after | note
 ```
 

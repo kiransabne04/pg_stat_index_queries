@@ -30,15 +30,15 @@ SELECT index_deps.index_drop_impact('o'::regclass);
 -- Query text EXPLAIN can't take as is: typed literals and PREPARE.
 SELECT q AS input, index_deps.explainable_query(q) AS explained
   FROM unnest(ARRAY[
-    'SELECT * FROM t WHERE ts >= timestamptz $1 - $2 * interval $3',
+    'SELECT id, ts FROM t WHERE ts >= timestamptz $1 - $2 * interval $3',
     'SELECT timestamp with time zone $1, double precision $2, character varying $3',
-    'SELECT * FROM t WHERE a BETWEEN $1 AND $2 LIMIT $3',
+    'SELECT id, a FROM t WHERE a BETWEEN $1 AND $2 LIMIT $3',
     'SELECT $1 AT TIME ZONE $2',
     'SELECT a FROM t WHERE b LIKE $1 ESCAPE $2',
     'PREPARE p(int, numeric(10,2)) AS SELECT $1 + $2, $10',
     'prepare "Q"  as select 1',
     'SELECT 1',
-    '/* app:checkout */ SELECT * FROM t WHERE a = $1',
+    '/* app:checkout */ SELECT id, a FROM t WHERE a = $1',
     E'-- traced\n  /* a */ /* b */ PREPARE p(int) AS SELECT $1',
     'SELECT 1 /* trailing comment stays */'
   ]) AS q;

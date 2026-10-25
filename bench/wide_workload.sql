@@ -3,4 +3,4 @@
 \set i random(1, 1000000)
 SELECT id, total FROM orders WHERE customer_id = :c;
 SELECT count(*) FROM orders WHERE tenant_id = :t AND created_at > now() - interval '1 hour';
-SELECT * FROM orders WHERE id = :i;
+SELECT id, tenant_id, customer_id, status, total, created_at FROM orders WHERE id = :i;

@@ -25,41 +25,41 @@ $$;
 -- 1. plain index scan
 SELECT pg_stat_index_queries_reset();
 SELECT pad FROM t WHERE id = 42;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
 
 -- 2. index-only scan
 SELECT pg_stat_index_queries_reset();
 SELECT id FROM t WHERE id BETWEEN 10 AND 12;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
 
 -- 3. bitmap scan combining two indexes
 SELECT pg_stat_index_queries_reset();
 SET enable_indexscan = off;
 SELECT count(*) FROM t WHERE a = 1 OR b = 2;
 RESET enable_indexscan;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
 
 -- 4. index in the plan but never executed (one-time filter is false)
 SELECT pg_stat_index_queries_reset();
 SELECT pad FROM t WHERE id = 7 AND (SELECT false);
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
 
 -- 5. prepared statement executed 5 times -> one queryid, 5 calls
 SELECT pg_stat_index_queries_reset();
 PREPARE p(int) AS SELECT pad FROM t WHERE id = $1;
 EXECUTE p(1); EXECUTE p(2); EXECUTE p(3); EXECUTE p(4); EXECUTE p(5);
 DEALLOCATE p;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
 SELECT count(DISTINCT queryid) AS distinct_queries
   FROM pg_stat_index_queries WHERE indexrelid = 't_pkey'::regclass;
 
 -- 6. nested statements: ignored with track = top, recorded with track = all
 SELECT pg_stat_index_queries_reset();
 DO $$ BEGIN PERFORM pad FROM t WHERE a = 3; END $$;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
 SET pg_stat_index_queries.track = 'all';
 DO $$ BEGIN PERFORM pad FROM t WHERE a = 3; END $$;
-SELECT * FROM idx_counts();
+SELECT indexname, toplevel, calls_executed, calls_planned FROM idx_counts();
 RESET pg_stat_index_queries.track;
 
 -- 7. helper views

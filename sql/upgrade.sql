@@ -20,7 +20,12 @@ SELECT to_regclass('pg_index_usage') IS NULL AS usage_absent_in_0_4;
 ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.5';
 SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
 SELECT to_regclass('pg_index_usage') IS NOT NULL AS usage_present_in_0_5;
--- The upgraded objects must be identical to a fresh 0.5 install.
+-- 0.5 -> 0.6: pg_stat_index_queries_sampled(); pg_index_usage knows about sampling.
+SELECT to_regprocedure('pg_stat_index_queries_sampled()') IS NULL AS sampled_absent_in_0_5;
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.6';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+SELECT pg_stat_index_queries_sampled() AS sampled_after_update;
+-- The upgraded objects (0.1 -> ... -> 0.6) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT CASE d.classid WHEN 'pg_proc'::regclass THEN 'function ' || d.objid::regprocedure::text
                       ELSE 'view ' || d.objid::regclass::text END AS name,

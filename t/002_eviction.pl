@@ -22,7 +22,7 @@ $setup .= "CREATE TABLE e$_ (id int PRIMARY KEY); INSERT INTO e$_ VALUES (1);\n"
 $node->safe_psql('postgres', $setup);
 
 my $queries = "SET enable_seqscan = off;\n";
-$queries .= "SELECT * FROM e$_ WHERE id = 1;\n" for 1 .. 150;
+$queries .= "SELECT id FROM e$_ WHERE id = 1;\n" for 1 .. 150;
 $node->safe_psql('postgres', $queries);
 
 my ($entries, $dealloc) = split(/\|/,

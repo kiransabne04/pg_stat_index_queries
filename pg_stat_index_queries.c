@@ -9,6 +9,15 @@
  * (dbid, indexrelid, queryid, toplevel), in the style of
  * pg_stat_statements.
  *
+ * Each backend first adds its counts to a local pending table and moves
+ * them into the shared hash at most every flush_interval milliseconds
+ * (without waiting for the lock), when the pending table is full, when the
+ * backend exits, and before it reads the counters itself. So no statement
+ * touches shared memory, and other sessions see a backend's counts up to
+ * flush_interval late. flush_interval = 0 updates shared memory after
+ * every statement. sample_rate < 1 records only that fraction of
+ * statements and scales the counts.
+ *
  * Supported: PostgreSQL 15, 16, 17, 18.
  *
  * Copyright (c) 2026, Kiran Sabne
@@ -20,7 +29,9 @@
 
 #include "access/parallel.h"
 #include "access/transam.h"
+#include "access/xact.h"
 #include "catalog/pg_type.h"
+#include "common/pg_prng.h"
 #include "executor/executor.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -42,8 +53,10 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 #include "utils/timestamp.h"
 
+#include <math.h>
 #include <unistd.h>
 
 PG_MODULE_MAGIC;
@@ -54,7 +67,9 @@ PG_MODULE_MAGIC;
 
 /* Persistence across clean restarts (same approach as pg_stat_statements). */
 #define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
-#define PGSIQ_FILE_HEADER	0x51495301	/* "SIQ" + format version 1 */
+#define PGSIQ_FILE_HEADER	0x51495302	/* "SIQ" + format version 2 */
+#define PGSIQ_FILE_HEADER_V1	0x51495301	/* still read: no sampled flag */
+#define PGSIQ_MAX_PENDING	512		/* local entries before a forced flush */
 #define PGSIQ_PG_MAJOR		(PG_VERSION_NUM / 100)
 
 /* ---------- shared structures ---------- */
@@ -83,7 +98,18 @@ typedef struct pgsiqSharedState
 	slock_t		mutex;			/* protects fields below */
 	int64		dealloc;
 	TimestampTz stats_reset;
+	bool		sampled;		/* a statement was skipped by sample_rate */
 } pgsiqSharedState;
+
+/* Counts of one (index, query) not yet moved to shared memory. */
+typedef struct pgsiqPending
+{
+	pgsiqHashKey key;			/* must be first */
+	int64		calls_executed;
+	int64		calls_planned;
+	TimestampTz first_seen;
+	TimestampTz last_seen;
+} pgsiqPending;
 
 /* One index seen in the current statement */
 typedef struct pgsiqSeenIndex
@@ -120,12 +146,19 @@ static int	pgsiq_max = 10000;
 static int	pgsiq_track = PGSIQ_TRACK_TOP;
 static bool pgsiq_track_catalog = false;
 static bool pgsiq_save = true;
+static int	pgsiq_flush_interval = 1000;	/* ms */
+static double pgsiq_sample_rate = 1.0;
 
 /* ---------- state ---------- */
 
 static int	nesting_level = 0;
 static pgsiqSharedState *pgsiq = NULL;
 static HTAB *pgsiq_hash = NULL;
+
+/* Backend-local pending counts (see file header). */
+static HTAB *pending_hash = NULL;
+static TimestampTz last_flush = 0;
+static bool exit_hook_registered = false;
 
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
@@ -162,7 +195,11 @@ static void pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								 DestReceiver *dest, QueryCompletion *qc);
 static Size pgsiq_memsize(void);
 static bool pgsiq_walker(PlanState *planstate, void *context);
-static void pgsiq_store(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel);
+static void pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid,
+							 bool toplevel, int64 weight);
+static void pgsiq_flush(bool force);
+static void pgsiq_backend_exit(int code, Datum arg);
+static void pending_discard(void);
 static void entry_dealloc(void);
 static void pgsiq_shmem_shutdown(int code, Datum arg);
 static void pgsiq_load_file(void);
@@ -170,6 +207,7 @@ static void pgsiq_load_file(void);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_reset);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_info);
+PG_FUNCTION_INFO_V1(pg_stat_index_queries_sampled);
 
 /* ---------- module load ---------- */
 
@@ -219,6 +257,28 @@ _PG_init(void)
 							 &pgsiq_save,
 							 true,
 							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_stat_index_queries.flush_interval",
+							"How often a backend moves its counts to shared memory.",
+							"0 updates shared memory after every statement. Other sessions see a backend's counts up to this late.",
+							&pgsiq_flush_interval,
+							1000,
+							0,
+							60000,
+							PGC_SUSET,
+							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
+	DefineCustomRealVariable("pg_stat_index_queries.sample_rate",
+							 "Fraction of statements recorded; counts are scaled up.",
+							 "Below 1, counts are estimates and an index used rarely can be missed.",
+							 &pgsiq_sample_rate,
+							 1.0,
+							 0.0,
+							 1.0,
+							 PGC_SUSET,
 							 0,
 							 NULL, NULL, NULL);
 
@@ -283,6 +343,7 @@ pgsiq_shmem_startup(void)
 		SpinLockInit(&pgsiq->mutex);
 		pgsiq->dealloc = 0;
 		pgsiq->stats_reset = GetCurrentTimestamp();
+		pgsiq->sampled = false;
 	}
 
 	info.keysize = sizeof(pgsiqHashKey);
@@ -306,9 +367,10 @@ pgsiq_shmem_startup(void)
 /* ---------- persistence ---------- */
 
 /*
- * File layout: header, PG major, entry count, dealloc, stats_reset, then
- * entry_count records of (key, calls_executed, calls_planned, first_seen,
- * last_seen). Any mismatch or short read discards the whole file.
+ * File layout: header, PG major, entry count, dealloc, stats_reset, sampled
+ * (version 2 only), then entry_count records of (key, calls_executed,
+ * calls_planned, first_seen, last_seen). Any mismatch or short read discards
+ * the whole file. Version 1 files (0.1-0.5) are still read.
  */
 static void
 pgsiq_load_file(void)
@@ -319,6 +381,7 @@ pgsiq_load_file(void)
 	int64		count;
 	int64		dealloc;
 	TimestampTz stats_reset;
+	bool		sampled = false;
 	int64		i;
 
 	file = AllocateFile(PGSIQ_DUMP_FILE, PG_BINARY_R);
@@ -338,7 +401,11 @@ pgsiq_load_file(void)
 		fread(&stats_reset, sizeof(TimestampTz), 1, file) != 1)
 		goto bad_file;
 
-	if (header != PGSIQ_FILE_HEADER || pgmajor != PGSIQ_PG_MAJOR || count < 0)
+	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V1) ||
+		pgmajor != PGSIQ_PG_MAJOR || count < 0)
+		goto bad_file;
+	if (header == PGSIQ_FILE_HEADER &&
+		fread(&sampled, sizeof(bool), 1, file) != 1)
 		goto bad_file;
 
 	for (i = 0; i < count; i++)
@@ -370,6 +437,7 @@ pgsiq_load_file(void)
 
 	pgsiq->dealloc = dealloc;
 	pgsiq->stats_reset = stats_reset;
+	pgsiq->sampled = sampled;
 
 	FreeFile(file);
 
@@ -425,7 +493,8 @@ pgsiq_shmem_shutdown(int code, Datum arg)
 		fwrite(&pgmajor, sizeof(int32), 1, file) != 1 ||
 		fwrite(&count, sizeof(int64), 1, file) != 1 ||
 		fwrite(&pgsiq->dealloc, sizeof(int64), 1, file) != 1 ||
-		fwrite(&pgsiq->stats_reset, sizeof(TimestampTz), 1, file) != 1)
+		fwrite(&pgsiq->stats_reset, sizeof(TimestampTz), 1, file) != 1 ||
+		fwrite(&pgsiq->sampled, sizeof(bool), 1, file) != 1)
 		goto error;
 
 	hash_seq_init(&hash_seq, pgsiq_hash);
@@ -635,18 +704,41 @@ pgsiq_walker(PlanState *planstate, void *context)
 	return planstate_tree_walker(planstate, pgsiq_walker, context);
 }
 
+/*
+ * Add one statement's indexes to the backend-local pending table, then move
+ * the pending counts to shared memory if it's time. Timestamps are the
+ * statement start (cached, no clock call per statement).
+ */
 static void
-pgsiq_store(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel)
+pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
+				 int64 weight)
 {
-	TimestampTz now = GetCurrentTimestamp();
+	TimestampTz now = GetCurrentStatementStartTimestamp();
 	int			i;
 
-	LWLockAcquire(pgsiq->lock, LW_SHARED);
+	if (pending_hash == NULL)
+	{
+		HASHCTL		info;
+
+		info.keysize = sizeof(pgsiqHashKey);
+		info.entrysize = sizeof(pgsiqPending);
+		info.hcxt = TopMemoryContext;
+		pending_hash = hash_create("pg_stat_index_queries pending",
+								   64, &info,
+								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		last_flush = now;
+	}
+	if (!exit_hook_registered)
+	{
+		before_shmem_exit(pgsiq_backend_exit, (Datum) 0);
+		exit_hook_registered = true;
+	}
 
 	for (i = 0; i < ctx->nseen; i++)
 	{
 		pgsiqHashKey key;
-		pgsiqEntry *entry;
+		pgsiqPending *p;
+		bool		found;
 
 		memset(&key, 0, sizeof(key));
 		key.dbid = MyDatabaseId;
@@ -654,49 +746,124 @@ pgsiq_store(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel)
 		key.queryid = queryid;
 		key.toplevel = toplevel;
 
-		entry = (pgsiqEntry *) hash_search(pgsiq_hash, &key, HASH_FIND, NULL);
+		p = (pgsiqPending *) hash_search(pending_hash, &key, HASH_ENTER, &found);
+		if (!found)
+		{
+			p->calls_executed = 0;
+			p->calls_planned = 0;
+			p->first_seen = now;
+		}
+		p->calls_planned += weight;
+		if (ctx->seen[i].executed)
+			p->calls_executed += weight;
+		p->last_seen = now;
+	}
 
+	if (pgsiq_flush_interval == 0 ||
+		hash_get_num_entries(pending_hash) >= PGSIQ_MAX_PENDING)
+		pgsiq_flush(true);
+	else if (TimestampDifferenceExceeds(last_flush, now, pgsiq_flush_interval))
+		pgsiq_flush(false);
+}
+
+/*
+ * Move pending counts into the shared hash. force = false gives up if the
+ * lock is busy (the counts stay pending and are retried later); force =
+ * true waits for it. Existing entries are updated under the shared lock
+ * (per-entry spinlock); new ones are inserted under the exclusive lock.
+ */
+static void
+pgsiq_flush(bool force)
+{
+	HASH_SEQ_STATUS hash_seq;
+	pgsiqPending *p;
+	bool		need_insert = false;
+
+	if (pending_hash == NULL || pgsiq == NULL || pgsiq_hash == NULL ||
+		hash_get_num_entries(pending_hash) == 0)
+		return;
+
+	if (force)
+		LWLockAcquire(pgsiq->lock, LW_SHARED);
+	else if (!LWLockConditionalAcquire(pgsiq->lock, LW_SHARED))
+		return;
+
+	hash_seq_init(&hash_seq, pending_hash);
+	while ((p = hash_seq_search(&hash_seq)) != NULL)
+	{
+		pgsiqEntry *entry;
+
+		entry = (pgsiqEntry *) hash_search(pgsiq_hash, &p->key, HASH_FIND, NULL);
 		if (!entry)
 		{
-			bool		found;
+			need_insert = true;
+			continue;
+		}
+		SpinLockAcquire(&entry->mutex);
+		entry->calls_executed += p->calls_executed;
+		entry->calls_planned += p->calls_planned;
+		if (p->last_seen > entry->last_seen)
+			entry->last_seen = p->last_seen;
+		SpinLockRelease(&entry->mutex);
+		/* Removing the element just returned is allowed during a scan. */
+		hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+	}
+	LWLockRelease(pgsiq->lock);
 
-			/* Need exclusive lock to insert. */
-			LWLockRelease(pgsiq->lock);
+	if (need_insert)
+	{
+		if (force)
 			LWLockAcquire(pgsiq->lock, LW_EXCLUSIVE);
+		else if (!LWLockConditionalAcquire(pgsiq->lock, LW_EXCLUSIVE))
+			return;
+
+		hash_seq_init(&hash_seq, pending_hash);
+		while ((p = hash_seq_search(&hash_seq)) != NULL)
+		{
+			pgsiqEntry *entry;
+			bool		found;
 
 			if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
 				entry_dealloc();
 
-			entry = (pgsiqEntry *) hash_search(pgsiq_hash, &key,
+			entry = (pgsiqEntry *) hash_search(pgsiq_hash, &p->key,
 											   HASH_ENTER, &found);
 			if (!found)
 			{
 				SpinLockInit(&entry->mutex);
 				entry->calls_executed = 0;
 				entry->calls_planned = 0;
-				entry->first_seen = now;
-				entry->last_seen = now;
+				entry->first_seen = p->first_seen;
+				entry->last_seen = p->last_seen;
 			}
-
-			LWLockRelease(pgsiq->lock);
-			LWLockAcquire(pgsiq->lock, LW_SHARED);
-
-			/* Re-find: the entry may have been evicted meanwhile. */
-			entry = (pgsiqEntry *) hash_search(pgsiq_hash, &key,
-											   HASH_FIND, NULL);
-			if (!entry)
-				continue;
+			/* Exclusive lock held: no spinlock needed. */
+			entry->calls_executed += p->calls_executed;
+			entry->calls_planned += p->calls_planned;
+			if (p->last_seen > entry->last_seen)
+				entry->last_seen = p->last_seen;
+			hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
 		}
-
-		SpinLockAcquire(&entry->mutex);
-		entry->calls_planned++;
-		if (ctx->seen[i].executed)
-			entry->calls_executed++;
-		entry->last_seen = now;
-		SpinLockRelease(&entry->mutex);
+		LWLockRelease(pgsiq->lock);
 	}
 
-	LWLockRelease(pgsiq->lock);
+	last_flush = GetCurrentStatementStartTimestamp();
+}
+
+/* Don't lose a session's last counts when it disconnects. */
+static void
+pgsiq_backend_exit(int code, Datum arg)
+{
+	pgsiq_flush(true);
+}
+
+static void
+pending_discard(void)
+{
+	if (pending_hash != NULL)
+	{
+		hash_destroy(pending_hash);
+		pending_hash = NULL;
+	}
 }
 
 static void
@@ -708,16 +875,40 @@ pgsiq_ExecutorEnd(QueryDesc *queryDesc)
 		queryDesc->planstate != NULL &&
 		pgsiq_enabled(nesting_level))
 	{
-		pgsiqWalkContext ctx;
+		int64		weight = 1;
+		bool		skip = false;
 
-		ctx.nseen = 0;
-		ctx.overflow = false;
+		if (pgsiq_sample_rate < 1.0)
+		{
+			if (pgsiq_sample_rate <= 0.0 ||
+				pg_prng_double(&pg_global_prng_state) >= pgsiq_sample_rate)
+			{
+				skip = true;
+				/* Unlocked read first: no shared write on every statement. */
+				if (!pgsiq->sampled)
+				{
+					SpinLockAcquire(&pgsiq->mutex);
+					pgsiq->sampled = true;
+					SpinLockRelease(&pgsiq->mutex);
+				}
+			}
+			else
+				weight = (int64) rint(1.0 / pgsiq_sample_rate);
+		}
 
-		/* planstate_tree_walker() skips the root node; visit it ourselves. */
-		pgsiq_walker(queryDesc->planstate, &ctx);
+		if (!skip)
+		{
+			pgsiqWalkContext ctx;
 
-		if (ctx.nseen > 0)
-			pgsiq_store(&ctx, queryid, nesting_level == 0);
+			ctx.nseen = 0;
+			ctx.overflow = false;
+
+			/* planstate_tree_walker() skips the root node; visit it ourselves. */
+			pgsiq_walker(queryDesc->planstate, &ctx);
+
+			if (ctx.nseen > 0)
+				pgsiq_accumulate(&ctx, queryid, nesting_level == 0, weight);
+		}
 	}
 
 	if (prev_ExecutorEnd)
@@ -797,6 +988,9 @@ pg_stat_index_queries(PG_FUNCTION_ARGS)
 
 	check_loaded();
 
+	/* This backend's own counts are always visible to itself. */
+	pgsiq_flush(true);
+
 	InitMaterializedSRF(fcinfo, 0);
 
 	LWLockAcquire(pgsiq->lock, LW_SHARED);
@@ -847,6 +1041,12 @@ pg_stat_index_queries_reset(PG_FUNCTION_ARGS)
 
 	check_loaded();
 
+	/*
+	 * Drops this backend's pending counts too. Other backends' pending
+	 * counts (at most flush_interval old) still arrive after the reset.
+	 */
+	pending_discard();
+
 	LWLockAcquire(pgsiq->lock, LW_EXCLUSIVE);
 
 	hash_seq_init(&hash_seq, pgsiq_hash);
@@ -856,6 +1056,7 @@ pg_stat_index_queries_reset(PG_FUNCTION_ARGS)
 	SpinLockAcquire(&pgsiq->mutex);
 	pgsiq->dealloc = 0;
 	pgsiq->stats_reset = GetCurrentTimestamp();
+	pgsiq->sampled = false;
 	SpinLockRelease(&pgsiq->mutex);
 
 	LWLockRelease(pgsiq->lock);
@@ -873,6 +1074,7 @@ pg_stat_index_queries_info(PG_FUNCTION_ARGS)
 	TimestampTz stats_reset;
 
 	check_loaded();
+	pgsiq_flush(true);
 
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 		elog(ERROR, "return type must be a row type");
@@ -890,4 +1092,19 @@ pg_stat_index_queries_info(PG_FUNCTION_ARGS)
 	values[2] = TimestampTzGetDatum(stats_reset);
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/* True if sample_rate < 1 skipped any statement since the last reset. */
+Datum
+pg_stat_index_queries_sampled(PG_FUNCTION_ARGS)
+{
+	bool		sampled;
+
+	check_loaded();
+
+	SpinLockAcquire(&pgsiq->mutex);
+	sampled = pgsiq->sampled;
+	SpinLockRelease(&pgsiq->mutex);
+
+	PG_RETURN_BOOL(sampled);
 }

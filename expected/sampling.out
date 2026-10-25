@@ -1,0 +1,184 @@
+-- 0.6: backend-local batching (flush_interval) and sampling (sample_rate).
+CREATE TABLE sm (id int PRIMARY KEY, a int);
+CREATE INDEX sm_a_idx ON sm (a);
+INSERT INTO sm SELECT g, g % 100 FROM generate_series(1, 10000) g;
+VACUUM ANALYZE sm;
+SET enable_seqscan = off;
+SHOW pg_stat_index_queries.flush_interval;
+ pg_stat_index_queries.flush_interval 
+--------------------------------------
+ 1s
+(1 row)
+
+SHOW pg_stat_index_queries.sample_rate;
+ pg_stat_index_queries.sample_rate 
+-----------------------------------
+ 1
+(1 row)
+
+-- Batching: with a long flush interval the counts stay in this backend,
+-- but the backend's own reads flush them first, so they are exact.
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+SET pg_stat_index_queries.flush_interval = '60s';
+SELECT count(*) FROM sm WHERE a = 1;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM sm WHERE a = 2;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM sm WHERE a = 3;
+ count 
+-------
+   100
+(1 row)
+
+SELECT indexname, calls_executed, calls_planned
+  FROM pg_index_dependents WHERE tablename = 'sm' ORDER BY indexname;
+ indexname | calls_executed | calls_planned 
+-----------+----------------+---------------
+ sm_a_idx  |              3 |             3
+(1 row)
+
+-- flush_interval = 0: shared memory after every statement (0.5 behaviour).
+SET pg_stat_index_queries.flush_interval = 0;
+SELECT count(*) FROM sm WHERE a = 4;
+ count 
+-------
+   100
+(1 row)
+
+SELECT indexname, calls_executed
+  FROM pg_index_dependents WHERE tablename = 'sm' ORDER BY indexname;
+ indexname | calls_executed 
+-----------+----------------
+ sm_a_idx  |              4
+(1 row)
+
+RESET pg_stat_index_queries.flush_interval;
+-- Reset drops this backend's pending counts too.
+SET pg_stat_index_queries.flush_interval = '60s';
+SELECT count(*) FROM sm WHERE a = 5;
+ count 
+-------
+   100
+(1 row)
+
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+SELECT count(*) AS after_reset FROM pg_index_dependents WHERE tablename = 'sm';
+ after_reset 
+-------------
+           0
+(1 row)
+
+RESET pg_stat_index_queries.flush_interval;
+-- sample_rate = 1: exact, nothing marked as sampled.
+SELECT count(*) FROM sm WHERE a = 6;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM sm WHERE a = 7;
+ count 
+-------
+   100
+(1 row)
+
+SELECT calls_executed, pg_stat_index_queries_sampled() AS sampled
+  FROM pg_index_dependents WHERE indexname = 'sm_a_idx';
+ calls_executed | sampled 
+----------------+---------
+              2 | f
+(1 row)
+
+-- sample_rate = 0: nothing recorded; sampling is flagged, and an index
+-- with no recorded use is "unknown", not a drop candidate.
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+SET pg_stat_index_queries.sample_rate = 0;
+SELECT count(*) FROM sm WHERE a = 8;
+ count 
+-------
+   100
+(1 row)
+
+SELECT count(*) FROM sm WHERE id = 9;
+ count 
+-------
+     1
+(1 row)
+
+SELECT count(*) AS recorded FROM pg_index_dependents WHERE tablename = 'sm';
+ recorded 
+----------
+        0
+(1 row)
+
+SELECT pg_stat_index_queries_sampled() AS sampled;
+ sampled 
+---------
+ t
+(1 row)
+
+SELECT indexname, left(verdict, 46) AS verdict FROM pg_index_usage WHERE tablename = 'sm' ORDER BY indexname;
+ indexname |                    verdict                     
+-----------+------------------------------------------------
+ sm_a_idx  | unknown: sample_rate < 1 skipped statements si
+ sm_pkey   | unknown: sample_rate < 1 skipped statements si
+(2 rows)
+
+RESET pg_stat_index_queries.sample_rate;
+-- sample_rate = 0.5: about half of 400 statements are recorded, each
+-- adding 2, so the estimate is even and close to 400 (300-500 is beyond
+-- 5 standard deviations).
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+SET pg_stat_index_queries.sample_rate = 0.5;
+\set ECHO none
+RESET pg_stat_index_queries.sample_rate;
+SELECT calls_executed % 2 = 0 AS even, calls_executed BETWEEN 300 AND 500 AS plausible
+  FROM pg_index_dependents WHERE indexname = 'sm_a_idx';
+ even | plausible 
+------+-----------
+ t    | t
+(1 row)
+
+-- The reset clears the sampled flag.
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+SELECT pg_stat_index_queries_sampled() AS sampled_after_reset;
+ sampled_after_reset 
+---------------------
+ f
+(1 row)
+
+RESET enable_seqscan;
+DROP TABLE sm;

@@ -3,7 +3,11 @@
 # Runs a throwaway cluster in a temp directory. Run as a non-root user.
 #
 #   ./bench/run.sh [--scale 100] [--secs 300] [--runs 3] [--clients N] [--wide]
+#                  [--only WORKLOAD] [--on-conf 'name=value ...']
 #                  [--label NAME] [--note TEXT] [--out DIR]
+#
+# --on-conf: extra settings for the "on" mode only, e.g.
+#   --on-conf 'pg_stat_index_queries.flush_interval=0'
 #
 # Modes are interleaved (run 1: off then on, run 2: on then off, ...) so cache
 # warm-up, table bloat and checkpoints affect both modes equally. Each run
@@ -16,11 +20,12 @@ PG_CONFIG=${PG_CONFIG:-pg_config}
 BIN=$($PG_CONFIG --bindir)
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCALE=100; SECS=300; RUNS=3; CLIENTS=$(nproc); WIDE=0
-LABEL=$(hostname -s); NOTE=""; OUTDIR=$HERE/results
+LABEL=$(hostname -s); NOTE=""; OUTDIR=$HERE/results; ONLY=""; ON_CONF=""
 while [ $# -gt 0 ]; do case "$1" in
   --scale) SCALE=$2; shift 2;; --secs) SECS=$2; shift 2;; --runs) RUNS=$2; shift 2;;
   --clients) CLIENTS=$2; shift 2;; --wide) WIDE=1; shift;;
   --label) LABEL=$2; shift 2;; --note) NOTE=$2; shift 2;; --out) OUTDIR=$2; shift 2;;
+  --only) ONLY=$2; shift 2;; --on-conf) ON_CONF=$2; shift 2;;
   *) echo "unknown arg $1"; exit 1;; esac; done
 
 DIR=$(mktemp -d); PORT=55433; H="-h $DIR -p $PORT"
@@ -36,10 +41,11 @@ CONF
 
 # set_mode off|on: restart with or without the library preloaded.
 set_mode() {
-  local libs=""
+  local libs="" extra=""
   [ "$1" = on ] && libs=pg_stat_index_queries
+  if [ "$1" = on ]; then for kv in $ON_CONF; do extra="$extra -c $kv"; done; fi
   $BIN/pg_ctl -D $DIR/data -m fast stop >/dev/null 2>&1 || true
-  $BIN/pg_ctl -D $DIR/data -l $DIR/log -w -o "-c shared_preload_libraries=$libs" start >/dev/null
+  $BIN/pg_ctl -D $DIR/data -l $DIR/log -w -o "-c shared_preload_libraries=$libs$extra" start >/dev/null
   local got
   got=$($BIN/psql $H -d postgres -XAtc "SHOW shared_preload_libraries")
   if [ "$got" != "$libs" ]; then echo "mode $1: expected '$libs', server has '$got'" >&2; exit 1; fi
@@ -53,6 +59,7 @@ if [ $WIDE = 1 ]; then
 fi
 
 WORKLOADS="select_only tpcb"; [ $WIDE = 1 ] && WORKLOADS="$WORKLOADS wide"
+[ -n "$ONLY" ] && WORKLOADS="$ONLY"
 args_for() { case "$1" in
   select_only) echo "-n -S -M prepared";;
   tpcb) echo "-n -M prepared";;
@@ -86,6 +93,7 @@ RES="$OUTDIR/$(date +%Y-%m-%d)-$LABEL.md"
   echo "- Kernel: $(uname -sr), arch $(uname -m)"
   echo "- PostgreSQL: $($BIN/postgres --version)"
   echo "- pgbench scale $SCALE, $CLIENTS clients, $RUNS × ${SECS}s per mode, modes interleaved"
+  [ -n "$ON_CONF" ] && echo "- Settings in the \"on\" mode: \`$ON_CONF\`"
   echo
   echo "| Workload | Mean TPS off | Mean TPS on | Change | Spread off | Spread on |"
   echo "|---|---|---|---|---|---|"

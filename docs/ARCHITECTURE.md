@@ -4,7 +4,8 @@
 
 ```
 ExecutorRun / ExecutorFinish / ProcessUtility   -> track nesting level only
-ExecutorEnd                                     -> walk PlanState tree, record index OIDs
+ExecutorEnd                                     -> walk PlanState tree, add index OIDs to a backend-local pending table
+before_shmem_exit (backend)                     -> flush pending counts when the session ends
 shmem_request / shmem_startup                   -> shared hash + LWLock tranche; load saved file
 on_shmem_exit (postmaster)                      -> save file at clean shutdown
 ```
@@ -16,9 +17,17 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 4. **Executed vs planned:** IndexScan and IndexOnlyScan call `index_beginscan()` lazily on the first fetch (verified in PG 16 and 18 source), so a non-NULL `iss_ScanDesc` / `ioss_ScanDesc` means the scan ran. BitmapIndexScan builds its scan descriptor at init, so it is always counted as executed (approximation).
 5. De-duplicate per statement (up to 64 distinct indexes; more are dropped and the overflow is ignored).
 6. Skip catalog indexes (`oid < FirstNormalObjectId`) unless `track_catalog`.
+7. **Sampling (0.6):** with `sample_rate` < 1 a statement is recorded with that probability (`pg_prng_double`), and its counts are multiplied by `rint(1 / sample_rate)`. A skipped statement sets a shared `sampled` flag (written only when it was not already set), shown by `pg_stat_index_queries_sampled()` and used by `pg_index_usage` to report "unknown" instead of "no recorded use".
 
 ### Nesting
 `EXECUTE` and `PREPARE` don't increase nesting (same as pg_stat_statements), so SQL-level prepared statements count as top level. Statements inside DO blocks, functions, CALL, EXPLAIN ANALYZE count as nested.
+
+### Backend-local batching (0.6)
+- Each backend adds its counts to a local hash (`TopMemoryContext`, same key) instead of the shared hash. Timestamps are the statement start (cached), so there is no clock call per statement.
+- Flush to the shared hash: when `flush_interval` (default 1 s) has passed since the last flush, without waiting if the lock is busy (`LWLockConditionalAcquire`; the counts stay pending and are retried at the next statement); immediately when the pending table reaches 512 entries or `flush_interval = 0`; when the backend exits (`before_shmem_exit`); and before the backend reads the counters itself (`pg_stat_index_queries()`, `pg_stat_index_queries_info()`), so a session always sees its own counts.
+- Flush updates existing entries under the shared LWLock with the per-entry spinlock, then inserts new entries under the exclusive LWLock.
+- Why: in 0.5 every statement took the one shared LWLock and the entry spinlock, so on a busy server all cores kept writing the same cache lines (−3.4% on pgbench `-S`, 4 vCPU). Same model as PostgreSQL's own cumulative statistics (pending stats flushed about once a second).
+- Cost: other sessions see a backend's counts up to `flush_interval` late; a backend crash loses its pending counts (a crash already loses all counters); `pg_stat_index_queries_reset()` drops the caller's pending counts, but other backends' pending counts arrive after the reset.
 
 ### Shared memory
 - Key: `(dbid, indexrelid, queryid, toplevel)`, zero-padded with `memset` (HASH_BLOBS).
@@ -27,7 +36,7 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 - Eviction: when full, sort by `last_seen`, remove the oldest 5% (at least 10); `dealloc` counts runs.
 
 ### Persistence (0.2)
-- File `pg_stat/pg_stat_index_queries.stat`: header (magic + format version), PG major, count, dealloc, stats_reset, then fixed-size records.
+- File `pg_stat/pg_stat_index_queries.stat`: header (magic + format version), PG major, count, dealloc, stats_reset, `sampled` (format 2, 0.6+), then fixed-size records. Format 1 files (0.2–0.5) are still read, so upgrading doesn't lose the counters.
 - Written by the postmaster at clean shutdown (`on_shmem_exit`, exit code 0 only) to `.tmp`, then `durable_rename`.
 - Loaded when shared memory is created; deleted after loading so a crash never reloads stale data.
 - Any mismatch or short read: LOG "ignoring invalid … file", discard everything, delete the file.

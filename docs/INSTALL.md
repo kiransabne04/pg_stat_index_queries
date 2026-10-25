@@ -32,6 +32,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.3 → 0.4:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.4';` (adds `pg_index_query_stats`; SQL only, no restart). The view needs pg_stat_statements when you query it.
 
+**Upgrading 0.5 → 0.6:** install the new build, **restart** (the library changed: backend-local batching and sampling), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.6';`. Saved counters from 0.5 are kept across the restart. New settings `flush_interval` and `sample_rate`; see README.
+
 **Upgrading 0.4 → 0.5:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.5';` (adds `pg_index_role()` and `pg_index_usage`; `pg_index_dependents` gains `index_role`; `pg_index_query_stats` gains `index_role` and `index_notes` after `is_partial`, so `SELECT *` column positions change). SQL only, no restart.
 
 ## 2. Self-hosted, SQL edition (optional)
@@ -92,7 +94,7 @@ RDS has no per-plan source, so the dependency views are empty there (since SQL e
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 CREATE EXTENSION IF NOT EXISTS hypopg;
 \i sql_edition/install.sql
-SELECT * FROM index_deps.index_drop_impact('public.my_idx');
+SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.index_drop_impact('public.my_idx');
 ```
 
 ## Removing

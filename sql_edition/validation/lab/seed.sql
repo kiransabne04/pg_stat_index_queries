@@ -118,7 +118,7 @@ BEGIN
     SELECT '| ' || string_agg(k, ' | ') || ' |' || E'\n' ||
            '|' || string_agg('---', '|') || '|'
       INTO out FROM json_object_keys(j -> 0) AS k;
-    FOR r IN SELECT * FROM json_array_elements(j) LOOP
+    FOR r IN SELECT e.value FROM json_array_elements(j) AS e(value) LOOP
         out := out || E'\n| ' ||
                (SELECT string_agg(replace(replace(coalesce(e.value, ''), '|', '\|'), E'\n', ' '), ' | ')
                   FROM json_each_text(r) AS e) || ' |';

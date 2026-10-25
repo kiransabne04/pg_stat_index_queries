@@ -19,7 +19,7 @@ $node->safe_psql('postgres', q{
 	ANALYZE t;
 });
 
-my $query = q{SET enable_seqscan = off; SELECT * FROM t WHERE id = 5;};
+my $query = q{SET enable_seqscan = off; SELECT id FROM t WHERE id = 5;};
 $node->safe_psql('postgres', $query) for 1 .. 3;
 
 my $count_sql = q{SELECT coalesce(sum(calls_executed), 0)

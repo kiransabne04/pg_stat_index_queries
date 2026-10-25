@@ -15,8 +15,8 @@ SELECT coalesce((SELECT index_name FROM lab.truth WHERE tag = 'W12' AND index_na
                 'orders_customer_idx') AS cust_used \gset
 SELECT CASE :'cust_used' WHEN 'orders_customer_idx' THEN 'orders_customer_created_idx'
                          ELSE 'orders_customer_idx' END AS cust_other \gset
-INSERT INTO lab.env
-SELECT * FROM (VALUES
+INSERT INTO lab.env (k, v)
+SELECT v.k, v.v FROM (VALUES
     ('label', :'label'),
     ('server_version', current_setting('server_version')),
     ('plan source', index_deps.resolved_plan_source()),
@@ -57,7 +57,7 @@ $$;
 
 -- Per-tag index sets: ground truth, SQL edition, native.
 CREATE TABLE lab.attribution AS
-WITH tm AS (SELECT * FROM lab.tag_map()),
+WITH tm AS (SELECT queryid, tag, calls FROM lab.tag_map()),
 truth AS (
     SELECT tag, array_agg(DISTINCT qualname ORDER BY qualname) AS idx
       FROM lab.truth GROUP BY tag
@@ -234,7 +234,7 @@ SELECT lab.chk_bool('Q-W14-pct', 'query_stats', 'W14 pct_calls_using_index betwe
                     q.pct_calls_using_index > 0 AND q.pct_calls_using_index < 100,
                     '0 < pct < 100', coalesce(q.pct_calls_using_index::text, '(no row)'))
   FROM (SELECT 1) x
-  LEFT JOIN (SELECT s.* FROM index_deps.index_query_stats s JOIN lab.tag_map() tm USING (queryid)
+  LEFT JOIN (SELECT s.pct_calls_using_index FROM index_deps.index_query_stats s JOIN lab.tag_map() tm USING (queryid)
               WHERE tm.tag = 'W14' AND s.indexname = 'orders_status_idx') q ON true;
 
 SELECT lab.chk_bool('Q-W12-stats', 'query_stats', 'W12 row has calls, timing, rows and cache stats', 'medium',
@@ -244,14 +244,15 @@ SELECT lab.chk_bool('Q-W12-stats', 'query_stats', 'W12 row has calls, timing, ro
                     format('calls %s, index_calls %s, mean_ms %s, rows/call %s, hit%% %s',
                            q.calls, q.index_calls, round(q.mean_exec_ms::numeric, 3), q.rows_per_call, q.cache_hit_pct))
   FROM (SELECT 1) x
-  LEFT JOIN (SELECT s.* FROM index_deps.index_query_stats s JOIN lab.tag_map() tm USING (queryid)
+  LEFT JOIN (SELECT s.calls, s.index_calls, s.mean_exec_ms, s.rows_per_call, s.cache_hit_pct
+               FROM index_deps.index_query_stats s JOIN lab.tag_map() tm USING (queryid)
               WHERE tm.tag = 'W12' AND s.indexname = :'cust_used') q ON true;
 
 SELECT lab.chk_bool('Q-W18-other', 'query_stats', 'W18 join: other_indexes names the other side', 'low',
                     q.other_indexes IS NOT NULL AND cardinality(q.other_indexes) > 0,
                     'non-empty', coalesce(array_to_string(q.other_indexes, ', '), '(null)'))
   FROM (SELECT 1) x
-  LEFT JOIN (SELECT s.* FROM index_deps.index_query_stats s JOIN lab.tag_map() tm USING (queryid)
+  LEFT JOIN (SELECT s.other_indexes FROM index_deps.index_query_stats s JOIN lab.tag_map() tm USING (queryid)
               WHERE tm.tag = 'W18' AND s.indexname LIKE 'orders%' LIMIT 1) q ON true;
 \else
 SELECT lab.chk_bool('Q-none', 'query_stats', 'No plan source: index_query_stats is empty for the lab', 'medium',
@@ -349,7 +350,10 @@ SELECT lab.run_di('twin', ('lab.' || :'twin_used')::regclass);
 -- The drop-impact row for one tag, or a placeholder whose note says it is missing.
 CREATE FUNCTION lab.di_row(p_target text, p_tag text) RETURNS lab.di
 LANGUAGE sql AS $$
-    SELECT * FROM lab.di d WHERE d.target = p_target AND d.tag = p_tag
+    SELECT d.target, d.tag, d.queryid, d.calls, d.cost_with, d.cost_without, d.cost_ratio,
+           d.uses_index_now, d.uses_index_after, d.plan_changed, d.shape_without, d.note,
+           d.query, d.drop_blocker
+      FROM lab.di d WHERE d.target = p_target AND d.tag = p_tag
     UNION ALL
     SELECT p_target, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
            '(no row for ' || p_tag || ')', NULL, NULL
@@ -425,7 +429,7 @@ SELECT lab.chk_bool('D-knn', 'drop_impact', 'W07 GiST KNN: generic plan uses the
 
 -- A hypothetical HypoPG index identical to the target is present in the
 -- session: the "without" plan uses it and the drop looks free.
-SELECT * FROM hypopg_create_index('CREATE INDEX ON lab.order_items (product_id)');
+SELECT indexrelid, indexname FROM hypopg_create_index('CREATE INDEX ON lab.order_items (product_id)');
 SELECT lab.run_di('with_hypothetical_twin', 'lab.order_items_product_idx');
 SELECT hypopg_reset();
 SELECT lab.chk_bool('D-hypothetical', 'drop_impact', 'Hypothetical index in the session: real result or a warning', 'low',
@@ -504,16 +508,16 @@ $$;
 
 SELECT lab.chk_bool('E-not-index', 'errors', 'drop_impact on a table: clear error', 'low',
                     m LIKE 'error:%is not an index%', 'error: ... is not an index', m)
-  FROM lab.try($$SELECT * FROM index_deps.index_drop_impact('lab.orders')$$) m;
+  FROM lab.try($$SELECT queryid, note FROM index_deps.index_drop_impact('lab.orders')$$) m;
 SELECT lab.chk_bool('E-missing', 'errors', 'drop_impact on a missing index: clear error', 'low',
                     m LIKE 'error:%does not exist%', 'error: ... does not exist', m)
-  FROM lab.try($$SELECT * FROM index_deps.index_drop_impact('lab.no_such_idx')$$) m;
+  FROM lab.try($$SELECT queryid, note FROM index_deps.index_drop_impact('lab.no_such_idx')$$) m;
 SELECT lab.chk_bool('E-no-hypopg', 'errors', 'drop_impact without HypoPG: clear error', 'low',
                     m LIKE 'error:%HypoPG%', 'error: HypoPG ... is required', m)
-  FROM lab.try($$SELECT * FROM index_deps.index_drop_impact('lab.orders_customer_idx')$$, 'DROP EXTENSION hypopg') m;
+  FROM lab.try($$SELECT queryid, note FROM index_deps.index_drop_impact('lab.orders_customer_idx')$$, 'DROP EXTENSION hypopg') m;
 SELECT lab.chk_bool('E-no-pgss-di', 'errors', 'drop_impact without pg_stat_statements: clear error', 'low',
                     m LIKE 'error:%pg_stat_statements%', 'error: pg_stat_statements is required', m)
-  FROM lab.try($$SELECT * FROM index_deps.index_drop_impact('lab.orders_customer_idx')$$, 'DROP EXTENSION pg_stat_statements') m;
+  FROM lab.try($$SELECT queryid, note FROM index_deps.index_drop_impact('lab.orders_customer_idx')$$, 'DROP EXTENSION pg_stat_statements') m;
 SELECT lab.chk_bool('E-no-pgss-qs', 'errors', 'index_query_stats without pg_stat_statements: clear error', 'low',
                     m LIKE 'error:%needs pg_stat_statements%', 'error: index_query_stats needs pg_stat_statements', m)
   FROM lab.try($$SELECT count(*) FROM index_deps.index_query_stats$$, 'DROP EXTENSION pg_stat_statements') m;

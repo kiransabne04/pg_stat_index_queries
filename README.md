@@ -8,7 +8,7 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.5 (SQL edition 0.4), experimental.** Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead hasn't been benchmarked on a proper machine yet. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
+> **Status: 0.6 (SQL edition 0.4), experimental.** Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 
@@ -107,20 +107,20 @@ SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.ind
 
 ## Overhead
 
-Measured on AWS `c7gd.xlarge` (4 Graviton3 vCPU, non-burstable, data on local NVMe), PostgreSQL 17.11, pgbench scale 100, 4 clients, 3 × 300 s per mode with modes interleaved, 24 Oct 2026 ([raw results](bench/results/2026-10-24-aws-c7gd.xlarge-pg17.md)):
+Measured on AWS `c7gd.xlarge`: 4 Graviton3 vCPU, non-burstable, data on local NVMe. PostgreSQL 17.11, pgbench scale 100, 4 clients, 3 × 300 s per mode, with modes interleaved. Raw results: [0.6](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06.md), [0.6 with `flush_interval=0`](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06-flush0.md), [0.5](bench/results/2026-10-24-aws-c7gd.xlarge-pg17.md).
 
-| Workload | TPS without | TPS with | Change | Spread off / on |
-|---|---|---|---|---|
-| `select_only` (`-S`, one PK lookup per transaction: worst case) | 96,116 | 92,862 | **−3.4%** | 2.1% / 1.0% |
-| `tpcb` (pgbench default, read/write) | 7,312 | 7,437 | +1.7% (noise) | 4.3% / 3.2% |
-| `wide` (20-index table, 3 statements per transaction) | 24,307 | 23,602 | **−2.9%** | 1.9% / 3.5% |
+| Workload | 0.5 | 0.6 (default, batching) | 0.6, `flush_interval=0` |
+|---|---|---|---|
+| `select_only` (`-S`, one PK lookup per transaction: worst case) | −3.4% | **−1.8%** (within noise: spread 3.6% / 1.7%) | −3.0% |
+| `wide` (20-index table, 3 statements per transaction) | −2.9% | **−0.9%** | not run |
+| `tpcb` (pgbench default, read/write) | +1.7% (noise) | +2.1% (noise) | not run |
 
-The cost is per statement, so it shows on tiny read-only statements: in `select_only` and `wide` every run with the extension was slower than every run without it, so the ~3% there is real. On the write workload it is lost in the noise. That's above the 1% target; a sampling setting to cut it (T04) is the next item on the roadmap. `bench/aws-ec2.sh` reruns this on a fresh instance.
+The cost is per statement, so it shows on tiny read-only statements. Batching (0.6) removes the shared-memory write from every statement. That roughly halves the overhead on `select_only`, and brings `wide` under 1%. The same machine with `flush_interval=0` (the 0.5 path) still costs 3%, so the gain comes from batching. What remains on `select_only` (about 1–2%) is the executor hooks and the plan walk. To go lower still, `sample_rate` skips the walk for most statements, with the trade-offs listed in Settings. `bench/aws-ec2.sh` reruns all of this.
 
 ## Tests
 
 ```bash
-make installcheck                 # native: 5 regression suites + 2 TAP tests (persistence incl. a real crash, eviction)
+make installcheck                 # native: 6 regression suites + 3 TAP tests (persistence incl. a real crash, eviction, flush across sessions)
 make -C sql_edition installcheck  # SQL edition: parsing, live pg_stat_plans, drop-impact (needs pg_stat_plans + HypoPG)
 make test-all                     # both
 ```

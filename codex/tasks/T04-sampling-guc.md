@@ -1,6 +1,6 @@
 # T04 — Sampling setting (only if T03 shows > 1% overhead)
 
-**Status (25 Oct 2026): implemented in native 0.6, together with backend-local batching (the main fix, see DECISIONS).** Was triggered: T03 measured −3.4% (`select_only`) and −2.9% (`wide`). Target version: native 0.6, shared with T07: whichever lands first takes 0.6. Rerun `bench/aws-ec2.sh` with `sample_rate` 1.0 / 0.1 / 0.01 for the acceptance numbers.
+**Status (25 Oct 2026): implemented in native 0.6, together with backend-local batching (the main fix, see DECISIONS).** Was triggered: T03 measured −3.4% (`select_only`) and −2.9% (`wide`). Benchmarked 0.6 defaults: `select_only` −1.8%, `wide` −0.9%. Open acceptance item: benchmark `sample_rate` 0.1 / 0.01, e.g. `BENCH_ARGS="--only select_only --on-conf pg_stat_index_queries.sample_rate=0.1" bench/aws-ec2.sh run`.
 
 ## Goal
 `pg_stat_index_queries.sample_rate` (real, 0.0–1.0, default 1.0, PGC_SUSET). When < 1, record a statement with that probability and scale counters.

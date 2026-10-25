@@ -28,7 +28,7 @@ instance_id() {
 }
 host() { aws_ ec2 describe-instances --instance-ids "$(instance_id)" --query 'Reservations[0].Instances[0].PublicIpAddress'; }
 ssh_() { ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$HOME/.ssh/$NAME.known_hosts" \
-             -o ConnectTimeout=15 "ubuntu@$(host)" "$@"; }
+             -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "ubuntu@$(host)" "$@"; }
 
 up() {
   vpc="$(aws_ ec2 describe-vpcs --filters Name=isDefault,Values=true --query 'Vpcs[0].VpcId')"
@@ -80,7 +80,7 @@ EOF
   echo "running: $(instance_id) $(host)"
   log "waiting for setup (PostgreSQL $PGV install)"
   for _ in $(seq 1 60); do
-    ssh_ test -f /var/lib/cloud/pgsiq-ready 2>/dev/null && { echo ready; return; }
+    ssh_ -n test -f /var/lib/cloud/pgsiq-ready 2>/dev/null && { echo ready; return; }
     sleep 10
   done
   echo "setup not finished after 10 minutes; check: ssh_ sudo tail /var/log/cloud-init-output.log" >&2
@@ -90,17 +90,17 @@ EOF
 push() {
   log "copy checkout $(git -C "$repo" rev-parse --short HEAD) and build"
   git -C "$repo" archive --format=tar HEAD | ssh_ 'rm -rf ~/src && mkdir ~/src && tar -x -C ~/src'
-  ssh_ "cd ~/src && make PG_CONFIG=/usr/lib/postgresql/$PGV/bin/pg_config COPT=-Werror >/dev/null && sudo make PG_CONFIG=/usr/lib/postgresql/$PGV/bin/pg_config install >/dev/null && echo built"
+  ssh_ -n "cd ~/src && make PG_CONFIG=/usr/lib/postgresql/$PGV/bin/pg_config COPT=-Werror >/dev/null && sudo make PG_CONFIG=/usr/lib/postgresql/$PGV/bin/pg_config install >/dev/null && echo built"
 }
 
 run() {
   log "start bench (background; ~1.5 h)"
-  note="$(ssh_ "lscpu | awk -F: '/Model name|^CPU\\(s\\)/ {gsub(/^ +/,\"\",\$2); printf \"%s; \", \$2}'; free -g | awk '/Mem:/ {printf \"%s GB RAM; \", \$2}'; lsblk -dno MODEL /dev/nvme1n1 2>/dev/null | tr -d '\\n'; echo '; '; uname -r")"
-  ssh_ "cd ~/src && export TMPDIR=\$( [ -d /mnt/nvme ] && echo /mnt/nvme || echo /tmp ) PG_CONFIG=/usr/lib/postgresql/$PGV/bin/pg_config PATH=/usr/lib/postgresql/$PGV/bin:\$PATH && \
-        nohup ./bench/run.sh --wide --label aws-$TYPE-pg$PGV --note 'AWS $TYPE ap-southeast-2, data on local NVMe; $note' > ~/bench.log 2>&1 < /dev/null & echo started"
+  note="$(ssh_ -n "lscpu | awk -F: '/Model name|^CPU\\(s\\)/ {gsub(/^ +/,\"\",\$2); printf \"%s; \", \$2}'; free -g | awk '/Mem:/ {printf \"%s GB RAM; \", \$2}'; lsblk -dno MODEL /dev/nvme1n1 2>/dev/null | tr -d '\\n'; echo '; '; uname -r")"
+  ssh_ -n "nohup bash -c 'cd ~/src && export TMPDIR=\$( [ -d /mnt/nvme ] && echo /mnt/nvme || echo /tmp ) PG_CONFIG=/usr/lib/postgresql/$PGV/bin/pg_config PATH=/usr/lib/postgresql/$PGV/bin:\$PATH && \
+        ./bench/run.sh --wide --label aws-$TYPE-pg$PGV --note \"AWS $TYPE ap-southeast-2, data on local NVMe; $note\"' > ~/bench.log 2>&1 < /dev/null & echo started"
 }
 
-status() { ssh_ 'tail -5 ~/bench.log; ls ~/src/bench/results/'; }
+status() { ssh_ -n 'tail -5 ~/bench.log; ls ~/src/bench/results/'; }
 
 fetch() {
   log "results"

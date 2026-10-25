@@ -1,5 +1,7 @@
 # T03 — Publish overhead benchmarks on a 4–8 vCPU machine
 
+**Status (24 Oct 2026): done.** `bench/results/2026-10-24-aws-c7gd.xlarge-pg17.md`; README updated. Result: −3.4% `select_only`, −2.9% `wide`, noise on `tpcb`, so T04 is opened.
+
 ## Goal
 Replace the early 2-vCPU numbers in README with proper ones.
 

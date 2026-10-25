@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- **T03 benchmark (publishable):** AWS c7gd.xlarge, PG 17.11, scale 100, 3 × 300 s per mode: `select_only` −3.4%, `wide` −2.9%, `tpcb` +1.7% (noise). Above the 1% target, so T04 (sampling setting) is next. The README "Overhead" section now shows these numbers instead of the early 2-vCPU result. `bench/aws-ec2.sh` now never waits on SSH input (`-n`, keepalive, detached run).
 - `bench/aws-ec2.sh`: up / push / run / status / fetch / down for the publishable benchmark (T03) on a dedicated EC2 instance (default `c7gd.xlarge`, local NVMe). Not run yet: the free-plan account only allows 2-vCPU free-tier instance types.
 - **T05: verified on AWS** (24 Oct 2026, ap-southeast-2). Aurora PostgreSQL 17.9.5 in express configuration, with the pg_tle install: 115 PASS, 0 FAIL. RDS for PostgreSQL 17.11: 33 PASS, 0 FAIL. Reports are in `docs/validation/`. Real Aurora plan text was added to the `parse` test. Reader phase also run (express cluster + reader): attribution is per instance, and drop impact works on the reader.
 - Found on Aurora: a pg_tle install needs `GRANT pgtle_admin TO CURRENT_USER` (INSTALL.md and the lab runner now do this). The lab supports free-plan accounts: `LAB_AURORA_EXPRESS=1` and IAM-token connections (`PGPASSWORD_CMD`, refreshed before each connection).

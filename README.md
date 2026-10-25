@@ -104,12 +104,20 @@ SELECT * FROM index_deps.index_drop_impact('public.my_idx');
 
 ## Overhead
 
-Early result, 2-vCPU container, PG 16, pgbench scale 50, `-S -M prepared -c 4`, 3 × 20 s: **107,997 tps without, 107,564 with (−0.4%, within noise)**. Proper numbers on a 4–8 vCPU machine are a roadmap item: run `make bench`.
+Measured on AWS `c7gd.xlarge` (4 Graviton3 vCPU, non-burstable, data on local NVMe), PostgreSQL 17.11, pgbench scale 100, 4 clients, 3 × 300 s per mode with modes interleaved, 24 Oct 2026 ([raw results](bench/results/2026-10-24-aws-c7gd.xlarge-pg17.md)):
+
+| Workload | TPS without | TPS with | Change | Spread off / on |
+|---|---|---|---|---|
+| `select_only` (`-S`, one PK lookup per transaction: worst case) | 96,116 | 92,862 | **−3.4%** | 2.1% / 1.0% |
+| `tpcb` (pgbench default, read/write) | 7,312 | 7,437 | +1.7% (noise) | 4.3% / 3.2% |
+| `wide` (20-index table, 3 statements per transaction) | 24,307 | 23,602 | **−2.9%** | 1.9% / 3.5% |
+
+The cost is per statement, so it shows on tiny read-only statements: in `select_only` and `wide` every run with the extension was slower than every run without it, so the ~3% there is real. On the write workload it is lost in the noise. That's above the 1% target; a sampling setting to cut it (T04) is the next item on the roadmap. `bench/aws-ec2.sh` reruns this on a fresh instance.
 
 ## Tests
 
 ```bash
-make installcheck                 # native: 3 regression suites + 2 TAP tests (persistence incl. a real crash, eviction)
+make installcheck                 # native: 5 regression suites + 2 TAP tests (persistence incl. a real crash, eviction)
 make -C sql_edition installcheck  # SQL edition: parsing, live pg_stat_plans, drop-impact (needs pg_stat_plans + HypoPG)
 make test-all                     # both
 ```

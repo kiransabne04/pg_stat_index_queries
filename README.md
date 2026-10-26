@@ -72,8 +72,11 @@ SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.ind
 |---|---|
 | `pg_stat_index_queries` | Raw counters: dbid, indexrelid, queryid, toplevel, calls_executed, calls_planned, first_seen, last_seen |
 | `pg_index_dependents` | Same, with schema, table and index names, current database, and `index_role` |
-| `pg_index_usage` | One row per index (partitions folded into the parent): `index_role`, `index_notes`, `drop_blocker`, queries and calls since `tracked_since`, and a `verdict` (used / drop candidate / no use but needed, e.g. enforces a primary key / invalid / unknown after evictions) |
+| `pg_index_usage` | One row per index (partitions folded into the parent): `index_role`, `index_notes`, `drop_blocker`, queries and calls since `tracked_since`, and a `verdict` (used / drop candidate / no use but needed, e.g. enforces a primary key / invalid / unknown after evictions), and `hints` (0.7, from `pg_index_hints`) |
 | `pg_index_role(index)` | What an index is for besides speed: `index_role` (primary key, unique constraint, exclusion constraint, unique index, index), `index_notes` (referenced by foreign keys, replica identity, clustered, invalid, partial, expression, partition) and `drop_blocker` (why DROP INDEX fails or changes behaviour) |
+| `pg_index_table_stats` | Table-level context per index (from the statistics PostgreSQL already keeps; never reads table data): `table_rows_est` (NULL if never analyzed), pages and bytes, `index_bytes` and `index_to_table_pct`, live/dead rows, inserts/updates/deletes and `hot_update_pct`, seq and index scans, `last_idx_scan` (PG 16+), `last_analyzed`, `n_mod_since_analyze`, `stats_stale` (never analyzed, or more than 50 + 10% of rows changed since), `small_table` (< 1,000 rows or < 8 pages), `extended_stats` on the index's columns. Partitioned tables are summed over their leaf partitions |
+| `pg_index_column_stats` | One row per index key column (INCLUDE columns left out) from `pg_stats`: `null_frac`, `avg_width`, `n_distinct` and `distinct_est` (absolute), `rows_per_value_est`, `equality_selectivity_est`, top 5 most common values and frequencies, `mcv_total_freq`, `top_value_freq`, `skewed`, `histogram_buckets`, `correlation`. Expression columns use the statistics ANALYZE keeps for the index. `has_stats = false` when the column was never analyzed or the caller can't SELECT it. All values are estimates from the ANALYZE sample |
+| `pg_index_hints(index)` | Plain-language hints from the two views: tiny table, never analyzed or stale statistics, few distinct values, skewed leading column (helps rare values only), mostly NULL (a partial index would be smaller), multicolumn without extended statistics, write cost without reads |
 | `pg_index_dependents_rollup` | Partition indexes rolled up to the partitioned (parent) index |
 | `pg_index_query_stats` | For debugging: each (index, query) with the index definition, size, unique/partial flags, `index_role` and `index_notes`, calls through the index and `pct_calls_using_index`, `other_indexes` the query used, and the query's pg_stat_statements stats (calls, total/mean/min/max exec ms, plans and plan ms, rows and rows per call, shared buffers hit/read/dirtied/written, `cache_hit_pct`, temp blocks, I/O ms, WAL bytes, roles, query text). Stats summed over roles; NULL when pg_stat_statements no longer has the query. Needs pg_stat_statements when queried, not to install |
 | `pg_index_no_dependents` | User indexes with no executed use since `tracked_since` (excludes PK, unique, constraint indexes). Partitioned tables: one row per parent index, unused only if no partition index was used; size is the whole tree |
@@ -86,12 +89,15 @@ SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.ind
 |---|---|
 | `plan_index_usage` | Every index reference found in captured plans |
 | `index_dependents` | Per index and query: plans, calls, scan types, `ambiguous` flag, `index_role` |
-| `index_usage` | One row per index: role, notes, `drop_blocker`, queries and calls from captured plans, and a `verdict` (like the native `pg_index_usage`; `unknown` when there is no plan source or when plans on the table name an index that no longer exists) |
+| `index_usage` | One row per index: role, notes, `drop_blocker`, queries and calls from captured plans, and a `verdict` (like the native `pg_index_usage`; `unknown` when there is no plan source or when plans on the table name an index that no longer exists), and `hints` (0.6) |
 | `index_role(index)` | Same as the native `pg_index_role` |
+| `index_table_stats` | Same as the native `pg_index_table_stats` |
+| `index_column_stats` | Same as the native `pg_index_column_stats` |
+| `index_hints(index)` | Same as the native `pg_index_hints` |
 | `unresolved_plan_indexes` | Index names in captured plans that no longer exist (renamed or dropped) |
 | `index_query_stats` | Same as the native `pg_index_query_stats`, with `index_plans`, `index_calls`, `scan_types`, `ambiguous` and `source` from the captured plans (stats also summed over top-level and nested) |
 | `index_no_dependents` | Indexes no captured plan mentions (partition-aware like the native view). Leaves out tables whose plans name a missing (renamed?) index. Empty when there is no plan source (`none`, e.g. RDS) |
-| `index_drop_impact(index)` | Cost and plan change per dependent query if the index were gone, plus `drop_blocker`. Works in read-only transactions (Aurora readers); `p_timeout_ms` is a time budget for the whole call |
+| `index_drop_impact(index)` | Cost and plan change per dependent query if the index were gone, plus `drop_blocker`. Works in read-only transactions (Aurora readers); `p_timeout_ms` is a time budget for the whole call. `note` warns when the table's statistics are stale or missing (0.6), since the estimates rest on them |
 | `config` | `plan_source`: auto, aurora_stat_plans, pg_stat_plans, none |
 
 ## Settings (native)

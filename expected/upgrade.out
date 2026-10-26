@@ -95,7 +95,29 @@ SELECT pg_stat_index_queries_sampled() AS sampled_after_update;
  f
 (1 row)
 
--- The upgraded objects (0.1 -> ... -> 0.6) must be identical to a fresh install.
+-- 0.6 -> 0.7: table and column statistics (T08); hints in pg_index_usage.
+SELECT to_regclass('pg_index_table_stats') IS NULL AS stats_absent_in_0_6;
+ stats_absent_in_0_6 
+---------------------
+ t
+(1 row)
+
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.7';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+ extversion 
+------------
+ 0.7
+(1 row)
+
+SELECT to_regclass('pg_index_table_stats') IS NOT NULL AS table_stats,
+       to_regclass('pg_index_column_stats') IS NOT NULL AS column_stats,
+       to_regprocedure('pg_index_hints(regclass)') IS NOT NULL AS hints;
+ table_stats | column_stats | hints 
+-------------+--------------+-------
+ t           | t            | t
+(1 row)
+
+-- The upgraded objects (0.1 -> ... -> 0.7) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT CASE d.classid WHEN 'pg_proc'::regclass THEN 'function ' || d.objid::regprocedure::text
                       ELSE 'view ' || d.objid::regclass::text END AS name,

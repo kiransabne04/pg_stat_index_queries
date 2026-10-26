@@ -311,6 +311,9 @@ CREATE INDEX CONCURRENTLY life_invalid_idx ON lab.life ((100 / (c - 50)));
 \set ON_ERROR_STOP on
 
 \echo '=== seed: vacuum analyze'
+-- Flush this session's pending insert counts first, or they arrive after
+-- ANALYZE and make the statistics look stale.
+SELECT pg_stat_force_next_flush();
 VACUUM ANALYZE lab.customers, lab.products, lab.orders, lab.order_items, lab.events,
                lab."Mixed Case Tbl", lab.amb, lab_b.amb, lab.dbx, lab.life,
                lab.reader_only, lab.timeout_t, lab.bookings;

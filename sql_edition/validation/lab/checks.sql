@@ -311,6 +311,44 @@ SELECT lab.chk_bool('V-none', 'usage', 'No plan source: every verdict is unknown
   FROM index_deps.index_usage WHERE schemaname IN ('lab', 'lab_b');
 \endif
 
+\echo '=== checks: table and column statistics (T08)'
+SELECT pg_stat_force_next_flush();
+CREATE FUNCTION lab.colstat(p_index text, p_pos int DEFAULT 1)
+RETURNS TABLE (distinct_est numeric, skewed boolean, has_stats boolean, null_frac real)
+LANGUAGE sql AS $$
+    SELECT c.distinct_est, c.skewed, c.has_stats, c.null_frac
+      FROM index_deps.index_column_stats c
+     WHERE c.indexrelid = p_index::regclass AND c.key_position = p_pos
+$$;
+SELECT lab.chk_bool('S-distinct-pk', 'stats', 'customers_pkey: distinct values = table rows', 'medium',
+                    c.distinct_est BETWEEN 0.99 * :scale * 200000 AND 1.01 * :scale * 200000,
+                    '~' || (:scale * 200000), coalesce(c.distinct_est::text, '(null)'))
+  FROM lab.colstat('lab.customers_pkey') c;
+SELECT lab.chk_bool('S-skewed', 'stats', 'orders_status_idx: status is skewed (shipped ~95%)', 'medium',
+                    c.skewed, 'skewed = true', coalesce(c.skewed::text, '(null)'))
+  FROM lab.colstat('lab.orders_status_idx') c;
+SELECT lab.chk_bool('S-skewed-hint', 'stats', 'orders_status_idx: skew hint shown', 'low',
+                    EXISTS (SELECT 1 FROM unnest(index_deps.index_hints('lab.orders_status_idx')) h WHERE h LIKE '%is skewed%'),
+                    'hint present', array_to_string(index_deps.index_hints('lab.orders_status_idx'), ' | '));
+SELECT lab.chk_bool('S-expression', 'stats', 'customers_email_lower_idx: expression column has statistics', 'medium',
+                    c.has_stats AND c.distinct_est > 0, 'has_stats, distinct > 0',
+                    format('has_stats %s, distinct %s', c.has_stats, c.distinct_est))
+  FROM lab.colstat('lab.customers_email_lower_idx') c;
+SELECT lab.chk_bool('S-partitioned', 'stats', 'events_customer_idx: table rows summed over 12 partitions', 'medium',
+                    t.table_rows_est BETWEEN 0.95 * :scale * 600000 AND 1.05 * :scale * 600000,
+                    '~' || (:scale * 600000), coalesce(t.table_rows_est::text, '(null)'))
+  FROM index_deps.index_table_stats t WHERE t.indexrelid = 'lab.events_customer_idx'::regclass;
+SELECT lab.chk_bool('S-fresh', 'stats', 'orders statistics are fresh after the seed''s ANALYZE', 'low',
+                    NOT t.stats_stale, 'stats_stale = false',
+                    format('stale %s, modified since analyze %s', t.stats_stale, t.n_mod_since_analyze))
+  FROM index_deps.index_table_stats t WHERE t.indexrelid = 'lab.orders_status_idx'::regclass;
+SELECT lab.chk_bool('S-usage-hints', 'stats', 'index_usage carries hints (unused index: write cost without reads)', 'low',
+                    EXISTS (SELECT 1 FROM index_deps.index_usage u, unnest(u.hints) h
+                             WHERE u.indexrelid = 'lab.orders_amount_unused_idx'::regclass AND h LIKE 'write cost without reads%'),
+                    'hint present',
+                    (SELECT array_to_string(u.hints, ' | ') FROM index_deps.index_usage u
+                      WHERE u.indexrelid = 'lab.orders_amount_unused_idx'::regclass));
+
 \echo '=== checks: drop impact'
 \if :can_drop_impact
 CREATE TABLE lab.di (

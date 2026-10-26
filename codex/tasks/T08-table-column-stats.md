@@ -1,5 +1,7 @@
 # T08 — Table and column statistics behind every index decision
 
+**Status: done 26 Oct 2026** (native 0.7, SQL edition 0.6; unreleased).
+
 ## Why
 Usage alone doesn't say whether an index is needed or what dropping it does. Whether an index is needed, and what dropping it costs, depends on the data underneath it:
 - how many rows the table has;
@@ -41,7 +43,7 @@ Read-only, catalog and statistics views only. Pure SQL, so the same definition w
 | null_frac, avg_width | `pg_stats` |
 | n_distinct (raw) and distinct_est (absolute: negative n_distinct × table rows) | `pg_stats.n_distinct`, `reltuples` |
 | equality_selectivity_est (1 / distinct_est, adjusted for nulls) and rows_per_value_est | derived |
-| most_common_vals, most_common_freqs (top 5), mcv_total_freq, skewed (bool: top MCV freq > 10 × average) | `pg_stats` |
+| most_common_vals, most_common_freqs (top 5), mcv_total_freq, skewed (bool: top MCV freq ≥ 10% and either > 5 × the average share of a value or ≥ 10 × the rarest MCV freq) | `pg_stats` |
 | histogram_buckets (count of `histogram_bounds` − 1), histogram_bounds (first/last), correlation | `pg_stats` |
 | expression indexes: statistics from `pg_stats` rows of the index itself (`tablename` = index name) | `pg_stats` |
 

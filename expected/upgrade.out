@@ -117,7 +117,29 @@ SELECT to_regclass('pg_index_table_stats') IS NOT NULL AS table_stats,
  t           | t            | t
 (1 row)
 
--- The upgraded objects (0.1 -> ... -> 0.7) must be identical to a fresh install.
+-- 0.7 -> 0.8: column sets per query (T07); pg_index_column_usage.
+SELECT to_regclass('pg_index_column_usage') IS NULL AS column_usage_absent_in_0_7;
+ column_usage_absent_in_0_7 
+----------------------------
+ t
+(1 row)
+
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.8';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+ extversion 
+------------
+ 0.8
+(1 row)
+
+SELECT to_regclass('pg_index_column_usage') IS NOT NULL AS column_usage,
+       count(*) FILTER (WHERE attname IN ('cond_columns', 'order_columns', 'columns_complete')) AS new_columns
+  FROM pg_attribute WHERE attrelid = 'pg_stat_index_queries'::regclass AND attnum > 0;
+ column_usage | new_columns 
+--------------+-------------
+ t            |           3
+(1 row)
+
+-- The upgraded objects (0.1 -> ... -> 0.8) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT CASE d.classid WHEN 'pg_proc'::regclass THEN 'function ' || d.objid::regprocedure::text
                       ELSE 'view ' || d.objid::regclass::text END AS name,

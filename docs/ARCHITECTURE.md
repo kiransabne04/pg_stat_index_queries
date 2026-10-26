@@ -15,6 +15,7 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 2. Walk the executed `PlanState` tree (`planstate_tree_walker`, root visited explicitly). Covers initPlans, subPlans, Append/MergeAppend children, BitmapAnd/Or.
 3. For IndexScan / IndexOnlyScan / BitmapIndexScan nodes take `indexid` from the plan node.
 4. **Executed vs planned:** IndexScan and IndexOnlyScan call `index_beginscan()` lazily on the first fetch (verified in PG 16 and 18 source), so a non-NULL `iss_ScanDesc` / `ioss_ScanDesc` means the scan ran. BitmapIndexScan builds its scan descriptor at init, so it is always counted as executed (approximation).
+4a. **Columns (0.8):** for a scan that ran, the index columns in `indexqual` (and `indexorderby` for IndexScan / IndexOnlyScan) go into two `uint32` bitmasks, `cond_cols` and `order_cols`. Those expressions name index columns as `Var` with `varno = INDEX_VAR` and `varattno` = index column number (PG 15–18). Masks are OR'd per statement, into the pending entry and into the shared entry; columns above 32 (only with a larger `INDEX_MAX_KEYS`) are not recorded. A scan with no index condition (ordered scan, index-only count) records none. The 0.8 SQL function binds the C symbol `pg_stat_index_queries_0_8`; `pg_stat_index_queries` keeps the 8-column result, so a not-yet-updated extension works with the new library.
 5. De-duplicate per statement (up to 64 distinct indexes; more are dropped and the overflow is ignored).
 6. Skip catalog indexes (`oid < FirstNormalObjectId`) unless `track_catalog`.
 7. **Sampling (0.6):** with `sample_rate` < 1 a statement is recorded with that probability (`pg_prng_double`), and its counts are multiplied by `rint(1 / sample_rate)`. A skipped statement sets a shared `sampled` flag (written only when it was not already set), shown by `pg_stat_index_queries_sampled()` and used by `pg_index_usage` to report "unknown" instead of "no recorded use".
@@ -36,7 +37,7 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 - Eviction: when full, sort by `last_seen`, remove the oldest 5% (at least 10); `dealloc` counts runs.
 
 ### Persistence (0.2)
-- File `pg_stat/pg_stat_index_queries.stat`: header (magic + format version), PG major, count, dealloc, stats_reset, `sampled` (format 2, 0.6+), then fixed-size records. Format 1 files (0.2–0.5) are still read, so upgrading doesn't lose the counters.
+- File `pg_stat/pg_stat_index_queries.stat`: header (magic + format version), PG major, count, dealloc, stats_reset, `sampled` (format 2, 0.6+), then fixed-size records (format 3, 0.8+: with `cond_cols` and `order_cols`). Format 1 (0.2–0.5) and 2 (0.6–0.7) files are still read, so upgrading doesn't lose the counters; their entries get `cols_complete = false`, and `pg_index_column_usage` then says "unknown" instead of reporting a column as unused.
 - Written by the postmaster at clean shutdown (`on_shmem_exit`, exit code 0 only) to `.tmp`, then `durable_rename`.
 - Loaded when shared memory is created; deleted after loading so a crash never reloads stale data.
 - Any mismatch or short read: LOG "ignoring invalid … file", discard everything, delete the file.

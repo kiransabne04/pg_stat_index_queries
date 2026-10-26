@@ -18,6 +18,10 @@
  * every statement. sample_rate < 1 records only that fraction of
  * statements and scales the counts.
  *
+ * Each entry also records which index columns the query searched on
+ * (Vars in indexqual) and ordered by (indexorderby, e.g. KNN), as bitmasks
+ * OR'd over the scans that ran.
+ *
  * Supported: PostgreSQL 15, 16, 17, 18.
  *
  * Copyright (c) 2026, Kiran Sabne
@@ -50,6 +54,7 @@
 #include "storage/shmem.h"
 #include "storage/spin.h"
 #include "tcop/utility.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
@@ -67,10 +72,18 @@ PG_MODULE_MAGIC;
 
 /* Persistence across clean restarts (same approach as pg_stat_statements). */
 #define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
-#define PGSIQ_FILE_HEADER	0x51495302	/* "SIQ" + format version 2 */
+#define PGSIQ_FILE_HEADER	0x51495303	/* "SIQ" + format version 3 */
+#define PGSIQ_FILE_HEADER_V2	0x51495302	/* still read: no column masks */
 #define PGSIQ_FILE_HEADER_V1	0x51495301	/* still read: no sampled flag */
 #define PGSIQ_MAX_PENDING	512		/* local entries before a forced flush */
 #define PGSIQ_PG_MAJOR		(PG_VERSION_NUM / 100)
+
+/*
+ * Index columns are recorded in a uint32 bitmask (bit n-1 = column n).
+ * INDEX_MAX_KEYS is 32 unless PostgreSQL was built with a larger value;
+ * columns above 32 are then not recorded.
+ */
+#define PGSIQ_MAX_MASK_COLS	32
 
 /* ---------- shared structures ---------- */
 
@@ -90,6 +103,9 @@ typedef struct pgsiqEntry
 	int64		calls_planned;
 	TimestampTz first_seen;
 	TimestampTz last_seen;
+	uint32		cond_cols;		/* index columns searched on (indexqual) */
+	uint32		order_cols;		/* index columns ordered by (indexorderby) */
+	bool		cols_complete;	/* false: loaded from a file without masks */
 } pgsiqEntry;
 
 typedef struct pgsiqSharedState
@@ -109,6 +125,8 @@ typedef struct pgsiqPending
 	int64		calls_planned;
 	TimestampTz first_seen;
 	TimestampTz last_seen;
+	uint32		cond_cols;
+	uint32		order_cols;
 } pgsiqPending;
 
 /* One index seen in the current statement */
@@ -116,6 +134,8 @@ typedef struct pgsiqSeenIndex
 {
 	Oid			indexrelid;
 	bool		executed;
+	uint32		cond_cols;		/* from scans that ran */
+	uint32		order_cols;
 } pgsiqSeenIndex;
 
 typedef struct pgsiqWalkContext
@@ -205,6 +225,7 @@ static void pgsiq_shmem_shutdown(int code, Datum arg);
 static void pgsiq_load_file(void);
 
 PG_FUNCTION_INFO_V1(pg_stat_index_queries);
+PG_FUNCTION_INFO_V1(pg_stat_index_queries_0_8);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_reset);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_info);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_sampled);
@@ -368,9 +389,11 @@ pgsiq_shmem_startup(void)
 
 /*
  * File layout: header, PG major, entry count, dealloc, stats_reset, sampled
- * (version 2 only), then entry_count records of (key, calls_executed,
- * calls_planned, first_seen, last_seen). Any mismatch or short read discards
- * the whole file. Version 1 files (0.1-0.5) are still read.
+ * (version 2+), then entry_count records of (key, calls_executed,
+ * calls_planned, first_seen, last_seen, and in version 3 cond_cols and
+ * order_cols). Any mismatch or short read discards the whole file.
+ * Version 1 (0.1-0.5) and 2 (0.6-0.7) files are still read; their entries
+ * get cols_complete = false, so no column is reported as unused.
  */
 static void
 pgsiq_load_file(void)
@@ -401,10 +424,11 @@ pgsiq_load_file(void)
 		fread(&stats_reset, sizeof(TimestampTz), 1, file) != 1)
 		goto bad_file;
 
-	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V1) ||
+	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V2 &&
+		 header != PGSIQ_FILE_HEADER_V1) ||
 		pgmajor != PGSIQ_PG_MAJOR || count < 0)
 		goto bad_file;
-	if (header == PGSIQ_FILE_HEADER &&
+	if (header != PGSIQ_FILE_HEADER_V1 &&
 		fread(&sampled, sizeof(bool), 1, file) != 1)
 		goto bad_file;
 
@@ -420,6 +444,13 @@ pgsiq_load_file(void)
 			fread(&temp.first_seen, sizeof(TimestampTz), 1, file) != 1 ||
 			fread(&temp.last_seen, sizeof(TimestampTz), 1, file) != 1)
 			goto bad_file;
+		temp.cond_cols = 0;
+		temp.order_cols = 0;
+		temp.cols_complete = (header == PGSIQ_FILE_HEADER);
+		if (temp.cols_complete &&
+			(fread(&temp.cond_cols, sizeof(uint32), 1, file) != 1 ||
+			 fread(&temp.order_cols, sizeof(uint32), 1, file) != 1))
+			goto bad_file;
 
 		/* Never exceed the configured size; drop the remainder. */
 		if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
@@ -433,6 +464,9 @@ pgsiq_load_file(void)
 		entry->calls_planned = temp.calls_planned;
 		entry->first_seen = temp.first_seen;
 		entry->last_seen = temp.last_seen;
+		entry->cond_cols = temp.cond_cols;
+		entry->order_cols = temp.order_cols;
+		entry->cols_complete = temp.cols_complete;
 	}
 
 	pgsiq->dealloc = dealloc;
@@ -504,7 +538,9 @@ pgsiq_shmem_shutdown(int code, Datum arg)
 			fwrite(&entry->calls_executed, sizeof(int64), 1, file) != 1 ||
 			fwrite(&entry->calls_planned, sizeof(int64), 1, file) != 1 ||
 			fwrite(&entry->first_seen, sizeof(TimestampTz), 1, file) != 1 ||
-			fwrite(&entry->last_seen, sizeof(TimestampTz), 1, file) != 1)
+			fwrite(&entry->last_seen, sizeof(TimestampTz), 1, file) != 1 ||
+			fwrite(&entry->cond_cols, sizeof(uint32), 1, file) != 1 ||
+			fwrite(&entry->order_cols, sizeof(uint32), 1, file) != 1)
 		{
 			hash_seq_term(&hash_seq);
 			goto error;
@@ -628,19 +664,62 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 /* ---------- plan walk + capture ---------- */
 
-static void
-remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed)
+/*
+ * Set the bit of every index column referenced in an index qual or order-by
+ * list. Those expressions refer to index columns as Vars with varno
+ * INDEX_VAR and varattno = index column number.
+ */
+static bool
+index_cols_walker(Node *node, void *context)
 {
+	if (node == NULL)
+		return false;
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (var->varno == INDEX_VAR && var->varattno >= 1 &&
+			var->varattno <= PGSIQ_MAX_MASK_COLS)
+			*(uint32 *) context |= ((uint32) 1) << (var->varattno - 1);
+		return false;
+	}
+	return expression_tree_walker(node, index_cols_walker, context);
+}
+
+static uint32
+index_cols(List *exprs)
+{
+	uint32		mask = 0;
+
+	(void) index_cols_walker((Node *) exprs, &mask);
+	return mask;
+}
+
+/* Column masks are only collected for scans that ran. */
+static void
+remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed,
+			   List *indexqual, List *indexorderby)
+{
+	uint32		cond_cols = 0;
+	uint32		order_cols = 0;
 	int			i;
 
 	if (!pgsiq_track_catalog && indexrelid < FirstNormalObjectId)
 		return;
+
+	if (executed)
+	{
+		cond_cols = index_cols(indexqual);
+		order_cols = index_cols(indexorderby);
+	}
 
 	for (i = 0; i < ctx->nseen; i++)
 	{
 		if (ctx->seen[i].indexrelid == indexrelid)
 		{
 			ctx->seen[i].executed |= executed;
+			ctx->seen[i].cond_cols |= cond_cols;
+			ctx->seen[i].order_cols |= order_cols;
 			return;
 		}
 	}
@@ -653,6 +732,8 @@ remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed)
 
 	ctx->seen[ctx->nseen].indexrelid = indexrelid;
 	ctx->seen[ctx->nseen].executed = executed;
+	ctx->seen[ctx->nseen].cond_cols = cond_cols;
+	ctx->seen[ctx->nseen].order_cols = order_cols;
 	ctx->nseen++;
 }
 
@@ -669,20 +750,20 @@ pgsiq_walker(PlanState *planstate, void *context)
 		case T_IndexScanState:
 			{
 				IndexScanState *s = (IndexScanState *) planstate;
+				IndexScan  *plan = (IndexScan *) planstate->plan;
 
 				/* index_beginscan() runs lazily on first fetch */
-				remember_index(ctx,
-							   ((IndexScan *) planstate->plan)->indexid,
-							   s->iss_ScanDesc != NULL);
+				remember_index(ctx, plan->indexid, s->iss_ScanDesc != NULL,
+							   plan->indexqual, plan->indexorderby);
 				break;
 			}
 		case T_IndexOnlyScanState:
 			{
 				IndexOnlyScanState *s = (IndexOnlyScanState *) planstate;
+				IndexOnlyScan *plan = (IndexOnlyScan *) planstate->plan;
 
-				remember_index(ctx,
-							   ((IndexOnlyScan *) planstate->plan)->indexid,
-							   s->ioss_ScanDesc != NULL);
+				remember_index(ctx, plan->indexid, s->ioss_ScanDesc != NULL,
+							   plan->indexqual, plan->indexorderby);
 				break;
 			}
 		case T_BitmapIndexScanState:
@@ -692,9 +773,9 @@ pgsiq_walker(PlanState *planstate, void *context)
 				 * cannot tell whether it actually ran. Counted as executed;
 				 * documented as approximate.
 				 */
-				remember_index(ctx,
-							   ((BitmapIndexScan *) planstate->plan)->indexid,
-							   true);
+				BitmapIndexScan *plan = (BitmapIndexScan *) planstate->plan;
+
+				remember_index(ctx, plan->indexid, true, plan->indexqual, NIL);
 				break;
 			}
 		default:
@@ -752,11 +833,15 @@ pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
 			p->calls_executed = 0;
 			p->calls_planned = 0;
 			p->first_seen = now;
+			p->cond_cols = 0;
+			p->order_cols = 0;
 		}
 		p->calls_planned += weight;
 		if (ctx->seen[i].executed)
 			p->calls_executed += weight;
 		p->last_seen = now;
+		p->cond_cols |= ctx->seen[i].cond_cols;
+		p->order_cols |= ctx->seen[i].order_cols;
 	}
 
 	if (pgsiq_flush_interval == 0 ||
@@ -804,6 +889,8 @@ pgsiq_flush(bool force)
 		entry->calls_planned += p->calls_planned;
 		if (p->last_seen > entry->last_seen)
 			entry->last_seen = p->last_seen;
+		entry->cond_cols |= p->cond_cols;
+		entry->order_cols |= p->order_cols;
 		SpinLockRelease(&entry->mutex);
 		/* Removing the element just returned is allowed during a scan. */
 		hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
@@ -835,12 +922,17 @@ pgsiq_flush(bool force)
 				entry->calls_planned = 0;
 				entry->first_seen = p->first_seen;
 				entry->last_seen = p->last_seen;
+				entry->cond_cols = 0;
+				entry->order_cols = 0;
+				entry->cols_complete = true;
 			}
 			/* Exclusive lock held: no spinlock needed. */
 			entry->calls_executed += p->calls_executed;
 			entry->calls_planned += p->calls_planned;
 			if (p->last_seen > entry->last_seen)
 				entry->last_seen = p->last_seen;
+			entry->cond_cols |= p->cond_cols;
+			entry->order_cols |= p->order_cols;
 			hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
 		}
 		LWLockRelease(pgsiq->lock);
@@ -977,10 +1069,40 @@ check_loaded(void)
 				 errmsg("pg_stat_index_queries must be loaded via \"shared_preload_libraries\"")));
 }
 
-#define PG_STAT_INDEX_QUERIES_COLS 8
+/*
+ * Result shapes of pg_stat_index_queries(), as in pg_stat_statements: each
+ * SQL version binds its own C symbol, so an older SQL definition keeps
+ * working with a newer library until ALTER EXTENSION UPDATE.
+ */
+typedef enum pgsiqVersion
+{
+	PGSIQ_V0_1,					/* 8 columns */
+	PGSIQ_V0_8					/* + cond_columns, order_columns, columns_complete */
+} pgsiqVersion;
 
-Datum
-pg_stat_index_queries(PG_FUNCTION_ARGS)
+#define PG_STAT_INDEX_QUERIES_COLS_V0_1	8
+#define PG_STAT_INDEX_QUERIES_COLS_V0_8	11
+#define PG_STAT_INDEX_QUERIES_COLS		11	/* maximum of the above */
+
+/* Index column numbers set in a mask, as int2[] (ascending). */
+static Datum
+cols_to_array(uint32 mask)
+{
+	Datum		elems[PGSIQ_MAX_MASK_COLS];
+	int			n = 0;
+	int			i;
+
+	for (i = 0; i < PGSIQ_MAX_MASK_COLS; i++)
+	{
+		if (mask & (((uint32) 1) << i))
+			elems[n++] = Int16GetDatum(i + 1);
+	}
+	return PointerGetDatum(construct_array(elems, n, INT2OID, sizeof(int16),
+										   true, TYPALIGN_SHORT));
+}
+
+static void
+pg_stat_index_queries_internal(FunctionCallInfo fcinfo, pgsiqVersion api)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	HASH_SEQ_STATUS hash_seq;
@@ -1004,6 +1126,9 @@ pg_stat_index_queries(PG_FUNCTION_ARGS)
 		int64		calls_planned;
 		TimestampTz first_seen;
 		TimestampTz last_seen;
+		uint32		cond_cols;
+		uint32		order_cols;
+		bool		cols_complete;
 		int			i = 0;
 
 		memset(nulls, 0, sizeof(nulls));
@@ -1013,6 +1138,9 @@ pg_stat_index_queries(PG_FUNCTION_ARGS)
 		calls_planned = entry->calls_planned;
 		first_seen = entry->first_seen;
 		last_seen = entry->last_seen;
+		cond_cols = entry->cond_cols;
+		order_cols = entry->order_cols;
+		cols_complete = entry->cols_complete;
 		SpinLockRelease(&entry->mutex);
 
 		values[i++] = ObjectIdGetDatum(entry->key.dbid);
@@ -1023,13 +1151,34 @@ pg_stat_index_queries(PG_FUNCTION_ARGS)
 		values[i++] = Int64GetDatumFast(calls_planned);
 		values[i++] = TimestampTzGetDatum(first_seen);
 		values[i++] = TimestampTzGetDatum(last_seen);
+		if (api >= PGSIQ_V0_8)
+		{
+			values[i++] = cols_to_array(cond_cols);
+			values[i++] = cols_to_array(order_cols);
+			values[i++] = BoolGetDatum(cols_complete);
+		}
+
+		Assert(i == (api == PGSIQ_V0_1 ? PG_STAT_INDEX_QUERIES_COLS_V0_1 :
+					 PG_STAT_INDEX_QUERIES_COLS_V0_8));
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 							 values, nulls);
 	}
 
 	LWLockRelease(pgsiq->lock);
+}
 
+Datum
+pg_stat_index_queries(PG_FUNCTION_ARGS)
+{
+	pg_stat_index_queries_internal(fcinfo, PGSIQ_V0_1);
+	return (Datum) 0;
+}
+
+Datum
+pg_stat_index_queries_0_8(PG_FUNCTION_ARGS)
+{
+	pg_stat_index_queries_internal(fcinfo, PGSIQ_V0_8);
 	return (Datum) 0;
 }
 

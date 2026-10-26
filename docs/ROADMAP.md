@@ -8,7 +8,7 @@
 | 0.4.1 | Benchmarks on a 4–8 vCPU VM (pgbench -S, TPC-B, 20-index schema); README numbers | **Done 24 Oct 2026**: −3.4% `select_only`, −2.9% `wide`, noise on `tpcb`; above the 1% target |
 | 0.5 / SQL edition 0.4 | Index roles and per-index verdicts; drop-impact fixes from the lab; validated on Aurora 17.9 (writer + reader) and RDS 17.11 | Done 24 Oct 2026 |
 | 0.6 (this) | Backend-local batching + sampling GUC (T04) | Done 25 Oct 2026: `select_only` −3.4% → −1.8%, `wide` −2.9% → −0.9% |
-| 0.6.1 | Benchmark `sample_rate` 0.1; if `select_only` still > 1%, profile the hooks and plan walk (`perf`) | Overhead < 1% on every workload |
+| 0.6.1 | Benchmark `sample_rate` 0.1; profile the hooks and plan walk (`perf`) | **Done 26 Oct 2026**: profile shows the extension at ~0.7% of CPU on `select_only`; `sample_rate` 0.1 gave no measurable gain (noise-bound). Optional: a `--runs 10` run on one instance to show < 1% in TPS |
 | SQL edition 0.5 | Column lists instead of `SELECT *` in its functions and views | Next SQL edition change |
 | 0.7 | Index column usage per query (T07) or `pg_index_sole_path` (T02) | After 0.6.1 |
 | later | PGXN release, PGDG packaging request | Outside users exist |

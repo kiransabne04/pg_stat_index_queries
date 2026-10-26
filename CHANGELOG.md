@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- **CPU profile of 0.6** (`bench/profile.sh`, new): on pgbench `-S` the extension's own code is about 0.7% of all CPU samples (ExecutorEnd incl. plan walk and local counting ~0.5%, Run/Finish hooks ~0.2%). The larger TPS differences measured are within run-to-run and instance-to-instance noise (up to 6% between instances). A `sample_rate=0.1` run measured −3.3%, no better than recording every statement. Results: `bench/results/2026-10-25-*-sample0.1.md`, `2026-10-26-*-profile.txt`.
+
 ## 0.6 (2026-10-25): native 0.6 (SQL edition unchanged at 0.4)
 - **Benchmark of 0.6** (c7gd.xlarge, same method as T03): `select_only` −1.8% (was −3.4%; within noise), `wide` −0.9% (was −2.9%), `tpcb` noise. On the same machine, `flush_interval=0` (the 0.5 path) still costs −3.0%, so the gain is from batching. Results are in `bench/results/2026-10-25-*`. `bench/run.sh` gained `--only` and `--on-conf`; `bench/aws-ec2.sh` gained `BENCH_ARGS`.
 - **No `SELECT *`:** native 0.6 views and functions list their columns, and so do the tests, lab, examples, benchmark workload and docs. The functions are redefined in `0.5--0.6`, so an upgraded install still matches a fresh one. Released scripts are unchanged. The SQL edition's internal functions will follow in its next version.

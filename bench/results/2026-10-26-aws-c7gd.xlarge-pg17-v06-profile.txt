@@ -1,0 +1,58 @@
+# perf profile: pgbench -S -M prepared, 4 clients, 60s, scale 100
+# postgres (PostgreSQL) 17.11 (Ubuntu 17.11-1.pgdg24.04+2); settings: defaults; 2026-10-26 01:26 UTC
+tps = 88655.996006 (without initial connection time)
+
+## Share of all samples by shared object (self time)
+    44.08%  postgres                
+                                  0xc19ce0c52ab4
+                                  0xc19ce0e36724
+                                  0xc19ce0e3199c
+                                  0xc19ce0d7ff80
+                                  0xc19ce1056ffc
+                                  0xe5f2992084c4
+    39.53%  [kernel.kallsyms]       
+                       0xffffdde6005c2e20
+                       0xffffdde5fec81e98
+                                  0xc19ce0e3199c
+                                  0xc19ce0d7ff80
+                                  0xc19ce1056ffc
+                                  0xe5f2992084c4
+     6.96%  libc.so.6               
+
+## pg_stat_index_queries functions (self time, % of all samples)
+     0.19%  pg_stat_index_queries.so  [.] pgsiq_ExecutorEnd
+     0.11%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.06%  pg_stat_index_queries.so  [.] pgsiq_ExecutorFinish
+     0.04%  pg_stat_index_queries.so  [.] __sigsetjmp@plt
+     0.03%  pg_stat_index_queries.so  [.] standard_ExecutorRun@plt
+     0.03%  pg_stat_index_queries.so  [.] pgsiq_walker
+     0.03%  pg_stat_index_queries.so  [.] remember_index
+     0.03%  pg_stat_index_queries.so  [.] standard_ExecutorFinish@plt
+     0.03%  pg_stat_index_queries.so  [.] planstate_tree_walker_impl@plt
+     0.01%  pg_stat_index_queries.so  [.] TimestampDifferenceExceeds@plt
+     0.01%  pg_stat_index_queries.so  [.] GetCurrentStatementStartTimestamp@plt
+     0.01%  pg_stat_index_queries.so  [.] hash_get_num_entries@plt
+     0.00%  pg_stat_index_queries.so  [.] hash_search@plt
+     0.00%  pg_stat_index_queries.so  [.] standard_ExecutorEnd@plt
+
+## pg_stat_index_queries functions including what they call (children, % of all samples)
+     2.58%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     1.79%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     1.61%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     1.49%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     1.37%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     1.23%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     1.03%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.92%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.91%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.87%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.79%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.77%     0.01%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.52%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.47%     0.15%  pg_stat_index_queries.so  [.] pgsiq_ExecutorEnd
+     0.45%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.45%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.44%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.43%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.39%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun
+     0.38%     0.00%  pg_stat_index_queries.so  [.] pgsiq_ExecutorRun

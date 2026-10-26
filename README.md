@@ -115,7 +115,9 @@ Measured on AWS `c7gd.xlarge`: 4 Graviton3 vCPU, non-burstable, data on local NV
 | `wide` (20-index table, 3 statements per transaction) | −2.9% | **−0.9%** | not run |
 | `tpcb` (pgbench default, read/write) | +1.7% (noise) | +2.1% (noise) | not run |
 
-The cost is per statement, so it shows on tiny read-only statements. Batching (0.6) removes the shared-memory write from every statement. That roughly halves the overhead on `select_only`, and brings `wide` under 1%. The same machine with `flush_interval=0` (the 0.5 path) still costs 3%, so the gain comes from batching. What remains on `select_only` (about 1–2%) is the executor hooks and the plan walk. To go lower still, `sample_rate` skips the walk for most statements, with the trade-offs listed in Settings. `bench/aws-ec2.sh` reruns all of this.
+The cost is per statement, so it shows on tiny read-only statements. Batching (0.6) removes the shared-memory write from every statement. That roughly halves the overhead on `select_only`, and brings `wide` under 1%. The same machine with `flush_interval=0` (the 0.5 path) still costs 3%, so the gain comes from batching.
+
+**CPU profile** of pgbench `-S` with 0.6 defaults, all CPUs, 60 s ([profile](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v06-profile.txt), `bench/profile.sh`): the extension's own code is about **0.7% of all CPU samples**. The ExecutorEnd hook, including the plan walk and local counting, is about 0.5%; the ExecutorRun/ExecutorFinish hooks are about 0.2%. The rest of the measured `select_only` difference is run-to-run noise: spreads are 2–4%, and TPS differs by up to 6% between instances of the same type. A [`sample_rate=0.1` run](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06-sample0.1.md) measured −3.3%, which is no better than recording every statement, and only noise explains that. So `sample_rate` doesn't buy measurable speed on this workload; it exists for very large statement rates. `bench/aws-ec2.sh` and `bench/profile.sh` rerun all of this.
 
 ## Tests
 

@@ -37,7 +37,14 @@ SELECT p.proname AS uses_select_star
   FROM pg_proc p
  WHERE p.pronamespace = 'index_deps'::regnamespace
    AND p.prosrc ~ '(SELECT \*|\m[a-z_]+\.\*)';
--- The upgraded objects (0.1 -> ... -> 0.5) must be identical to a fresh install.
+-- 0.5 -> 0.6: table and column statistics (T08); hints in index_usage.
+SELECT to_regclass('index_deps.index_table_stats') IS NULL AS stats_absent_in_0_5;
+ALTER EXTENSION pg_index_deps UPDATE TO '0.6';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
+SELECT to_regclass('index_deps.index_table_stats') IS NOT NULL AS table_stats,
+       to_regclass('index_deps.index_column_stats') IS NOT NULL AS column_stats,
+       to_regprocedure('index_deps.index_hints(regclass)') IS NOT NULL AS hints;
+-- The upgraded objects (0.1 -> ... -> 0.6) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT 'function ' || p.oid::regprocedure::text AS name, pg_get_functiondef(p.oid) AS def
   FROM pg_proc p WHERE p.pronamespace = 'index_deps'::regnamespace

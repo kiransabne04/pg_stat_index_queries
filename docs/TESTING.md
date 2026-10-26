@@ -4,8 +4,8 @@
 
 | Command | What it covers |
 |---|---|
-| `make installcheck` | `sql/basic.sql`: index scan, index-only, bitmap, planned-not-executed, prepared statements, nesting (top vs all), helper views, catalog filter, reset · `sql/partitions.sql`: partition roll-up · `sql/query_stats.sql`: `pg_index_query_stats` calls/rows per normalized query, `other_indexes` on a join, partial flag and indexdef, rows kept with NULL stats after pg_stat_statements reset, clear error once pg_stat_statements is dropped · `sql/upgrade.sql`: 0.1 → 0.2 → 0.3 → 0.4 · `t/001_persistence.pl`: survives clean restart, `save = off`, corrupt file ignored and reported, **real crash** (process killed) doesn't reload stale counters · `t/002_eviction.pl`: `max = 100` with 150 indexes, dealloc counted, newest kept |
-| `make -C sql_edition installcheck` | `parse`: fixture plans incl. Backward, Index Only, BitmapOr, quoted names, same-name index in two schemas (ambiguous) · `dependents`: live pg_stat_plans · `query_stats`: `index_query_stats` on a join (scan types, other indexes, stats), clear error once pg_stat_statements is dropped · `drop_impact`: cost/plan change, index never left hidden, broken query skipped cleanly, DML skipped, error on non-index, typed literals (`interval $1`) and `PREPARE` texts rewritten so they can be EXPLAINed, partial index with a constant predicate reported as unknown (not "unchanged"), `IS NULL` partial index estimated normally, both again with no plan source (text-match candidates) · `upgrade`: 0.1 → 0.2 → 0.3 |
+| `make installcheck` | `sql/basic.sql`: index scan, index-only, bitmap, planned-not-executed, prepared statements, nesting (top vs all), helper views, catalog filter, reset · `sql/partitions.sql`: partition roll-up · `sql/query_stats.sql`: `pg_index_query_stats` calls/rows per normalized query, `other_indexes` on a join, partial flag and indexdef, rows kept with NULL stats after pg_stat_statements reset, clear error once pg_stat_statements is dropped · `sql/stats.sql` (shared with the SQL edition, from `scripts/stats_test.sql.in`): table and column statistics on exactly analyzed tables (uniform, few-valued, skewed, few-valued skewed, mostly NULL, expression, multicolumn with and without `CREATE STATISTICS`, partitioned, never analyzed), hints, stale statistics after writes · `sql/upgrade.sql`: every version up to the current one, upgraded objects identical to a fresh install · `t/001_persistence.pl`: survives clean restart, `save = off`, corrupt file ignored and reported, **real crash** (process killed) doesn't reload stale counters · `t/002_eviction.pl`: `max = 100` with 150 indexes, dealloc counted, newest kept |
+| `make -C sql_edition installcheck` | `parse`: fixture plans incl. Backward, Index Only, BitmapOr, quoted names, same-name index in two schemas (ambiguous) · `dependents`: live pg_stat_plans · `query_stats`: `index_query_stats` on a join (scan types, other indexes, stats), clear error once pg_stat_statements is dropped · `drop_impact`: cost/plan change, index never left hidden, broken query skipped cleanly, DML skipped, error on non-index, typed literals (`interval $1`) and `PREPARE` texts rewritten so they can be EXPLAINed, partial index with a constant predicate reported as unknown (not "unchanged"), `IS NULL` partial index estimated normally, both again with no plan source (text-match candidates) · `stats`: same as the native `stats` test, plus the stale-statistics note in `index_drop_impact` · `upgrade`: every version up to the current one, upgraded objects identical to a fresh install |
 | `./bench/run.sh` | pgbench overhead with/without the extension |
 
 All suites start their own temporary server, so they don't touch any existing cluster. Run them as a non-root user. The regression instances run with `--no-locale` (`NO_LOCALE = 1` in both Makefiles) so `ORDER BY` on names sorts the same on every machine.
@@ -78,6 +78,15 @@ Command: `sql_edition/validation/lab/run.sh`, run against the Docker playground 
 - Scale 1: about 3.8M rows and 76 indexes. Each run takes about 12 s.
 - "rds" means `--simulate-rds` (plan_source = none).
 - Counts include the native ground-truth rows.
+
+**26 Oct 2026** (SQL edition 0.6, native 0.7, with the T08 statistics checks S-*):
+
+| Run | PASS | FAIL | KNOWN |
+|---|---|---|---|
+| PG 16.15 / 17.11 / 18.6 | 193 | 0 | 5 |
+| PG 16.15 / 17.11 / 18.6, rds | 111 | 0 | 3 |
+
+The first run failed S-skewed and S-skewed-hint: `orders.status` (95 / 4.5 / 0.5%) was not flagged as skewed. Fixed before release (see CHANGELOG, T08).
 
 **After the fixes** (SQL edition 0.4, native 0.5):
 

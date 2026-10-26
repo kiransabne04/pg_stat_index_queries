@@ -46,6 +46,14 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 - Helper views join `pg_class` / `pg_index` for names; `pg_index_dependents_rollup` maps child indexes to their partitioned parent with `pg_partition_root()` and reports `calls_executed` as the max per partition (lower bound on statements) and `partition_scans_executed` as the sum. `pg_index_no_dependents` (0.3) uses the same mapping: a partitioned index is used if any index in its tree is, and attached partition indexes aren't listed on their own.
 - `pg_index_query_stats` (0.4) is a view over a PL/pgSQL function that joins `pg_index_dependents` to pg_stat_statements on (queryid, toplevel), summing over roles. It finds pg_stat_statements through `pg_extension` when called, so there is no install-time dependency and dropping pg_stat_statements isn't blocked; without it the view raises an error with a hint. `blk_read_time`/`blk_write_time` were renamed `shared_blk_*_time` in PG 17, so those two are read through `to_jsonb(row)` and one query text works on 15–18. The SQL edition's `index_deps.index_query_stats` (0.3) does the same over `index_deps.index_dependents`, joined on queryid only.
 
+### Table and column statistics (0.7; SQL edition 0.6)
+- `pg_index_table_stats`, `pg_index_column_stats` and `pg_index_hints()` (in the SQL edition: `index_deps.index_table_stats`, `index_column_stats`, `index_hints()`) put the planner's own statistics next to each index: `pg_class`, `pg_stat_user_tables` / `_indexes`, `pg_stats` and `pg_statistic_ext`. They never run ANALYZE and never read table data.
+- Both editions are generated from one source, `scripts/stats_objects.sql.in`: `scripts/gen_stats_objects.py native|sql` fills in the name prefix and prints the objects, which are pasted into each version script (version scripts must be self-contained). The regression test is shared the same way (`scripts/stats_test.sql.in`).
+- Partitioned tables are summed over their leaf partitions (`pg_partition_tree`). Expression key columns take the statistics ANALYZE stores under the index's name. `last_idx_scan` (PG 16+) is read through `to_jsonb(row)` so one definition works on 15–18.
+- `stats_stale` uses autovacuum's analyze rule (more than 50 rows + 10% changed since the last analyze, per partition), or never analyzed.
+- `skewed`: the top value covers at least 10% of rows and either 5× the average share of a value or 10× the share of the rarest common value. The second clause catches few-valued columns (e.g. 95 / 4.5 / 0.5% over 3 values), where 5× the average share is above 100%.
+- Hints feed `pg_index_usage.hints` / `index_usage.hints`, and `index_drop_impact`'s `note` mentions stale or missing statistics.
+
 ## SQL edition (`sql_edition/pg_index_deps--0.1.sql`)
 
 ```

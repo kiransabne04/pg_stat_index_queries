@@ -1,5 +1,10 @@
 -- Drop-impact check with HypoPG + EXPLAIN (GENERIC_PLAN).
 CREATE EXTENSION hypopg;
+-- Fresh statistics, so the notes below don't carry a "statistics stale"
+-- warning (that case is tested in stats.sql).
+SELECT pg_stat_force_next_flush();
+ANALYZE o;
+SELECT pg_stat_force_next_flush();
 
 SELECT count(*) FROM o WHERE c = 7;
 
@@ -64,7 +69,9 @@ INSERT INTO pi SELECT g, g % 500,
   FROM generate_series(1, 100000) g;
 CREATE INDEX pi_open_idx ON pi (k) WHERE status = 'open';
 CREATE INDEX pi_live_idx ON pi (id) WHERE deleted_at IS NULL;
+SELECT pg_stat_force_next_flush();
 VACUUM ANALYZE pi;
+SELECT pg_stat_force_next_flush();
 SELECT count(*) FROM pi WHERE status = 'open' AND k = 100;
 SELECT count(*) FROM pi WHERE deleted_at IS NULL AND id < 5000;
 SELECT left(query, 50) AS query, uses_index_now, plan_changed, note

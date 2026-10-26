@@ -34,6 +34,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.5 → 0.6:** install the new build, **restart** (the library changed: backend-local batching and sampling), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.6';`. Saved counters from 0.5 are kept across the restart. New settings `flush_interval` and `sample_rate`; see README.
 
+**Upgrading 0.6 → 0.7:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.7';` (adds `pg_index_table_stats`, `pg_index_column_stats` and `pg_index_hints()`; `pg_index_usage` gains a last column `hints`). SQL only, no restart.
+
 **Upgrading 0.4 → 0.5:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.5';` (adds `pg_index_role()` and `pg_index_usage`; `pg_index_dependents` gains `index_role`; `pg_index_query_stats` gains `index_role` and `index_notes` after `is_partial`, so `SELECT *` column positions change). SQL only, no restart.
 
 ## 2. Self-hosted, SQL edition (optional)
@@ -78,6 +80,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
    \i sql_edition/install_pg_tle.sql
    CREATE EXTENSION pg_index_deps;
    ```
+   SQL edition 0.6 adds `index_deps.index_table_stats`, `index_column_stats` and `index_hints()`; `index_usage` gains a last column `hints`, and `index_drop_impact`'s `note` warns when the table's statistics are stale or missing.
    SQL edition 0.5 only rewrites internal queries with column lists (no `SELECT *`); nothing changes for users.
    Upgrading to SQL edition 0.4 changes `index_drop_impact`: new last column `drop_blocker`, and `p_timeout_ms` is now a budget for the whole call (default 30000) instead of a per-query timeout that never took effect.
    To upgrade a pg_tle install later, run the newer `install_pg_tle.sql` (it registers the missing update paths and the new default version) and then `ALTER EXTENSION pg_index_deps UPDATE;`.

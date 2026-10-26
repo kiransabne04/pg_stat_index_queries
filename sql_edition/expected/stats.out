@@ -1,0 +1,233 @@
+-- Plan source 'none' keeps index_usage independent of the captured plans of other tests.
+UPDATE index_deps.config SET value = 'none' WHERE key = 'plan_source';
+-- T08: table and column statistics behind each index, and the hints.
+-- Tables are small enough that ANALYZE reads every row, so distinct counts,
+-- most common values and null fractions are exact. Autovacuum is off on
+-- these tables so nothing analyzes them behind the test's back.
+CREATE SCHEMA st;
+CREATE TABLE st.small (id int PRIMARY KEY, v int) WITH (autovacuum_enabled = false);
+INSERT INTO st.small SELECT g, g FROM generate_series(1, 100) g;
+CREATE INDEX small_v_idx ON st.small (v);
+CREATE TABLE st.big (id int PRIMARY KEY, uni int, low int, skew int, lowskew int, nul int, a int, b int, txt text)
+  WITH (autovacuum_enabled = false);
+INSERT INTO st.big
+SELECT g, g, g % 3, CASE WHEN g % 100 = 0 THEN g ELSE 0 END,
+       CASE WHEN g % 200 = 0 THEN 2 WHEN g % 20 = 0 THEN 1 ELSE 0 END,
+       CASE WHEN g % 10 = 0 THEN g END, g % 50, g % 50, 'Name' || (g % 500)
+  FROM generate_series(1, 20000) g;
+CREATE INDEX big_uni_idx ON st.big (uni);
+CREATE INDEX big_low_idx ON st.big (low);
+CREATE INDEX big_skew_idx ON st.big (skew);
+-- 3 values at 95%, 4.5% and 0.5%: skewed although distinct values are few.
+CREATE INDEX big_lowskew_idx ON st.big (lowskew);
+CREATE INDEX big_nul_idx ON st.big (nul);
+CREATE INDEX big_nul_partial_idx ON st.big (nul) WHERE nul IS NOT NULL;
+CREATE INDEX big_ab_idx ON st.big (a, b) INCLUDE (txt);
+CREATE INDEX big_lower_idx ON st.big (lower(txt));
+CREATE TABLE st.ev (id int, at date) PARTITION BY RANGE (at);
+CREATE TABLE st.ev_1 PARTITION OF st.ev FOR VALUES FROM ('2026-01-01') TO ('2026-07-01') WITH (autovacuum_enabled = false);
+CREATE TABLE st.ev_2 PARTITION OF st.ev FOR VALUES FROM ('2026-07-01') TO ('2027-01-01') WITH (autovacuum_enabled = false);
+INSERT INTO st.ev SELECT g, date '2026-01-01' + (g % 360) FROM generate_series(1, 3000) g;
+CREATE INDEX ev_id_idx ON st.ev (id);
+CREATE TABLE st.never (id int, v int) WITH (autovacuum_enabled = false);
+INSERT INTO st.never SELECT g, g FROM generate_series(1, 5000) g;
+CREATE INDEX never_v_idx ON st.never (v);
+-- VACUUM sets the row estimate (PG 18's CREATE INDEX no longer does) but is
+-- not an ANALYZE: the table still counts as never analyzed.
+VACUUM st.never;
+-- Flush this session's pending insert counts first: counts that arrive after
+-- ANALYZE would count as changes since the analyze.
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+ANALYZE st.small, st.big, st.ev;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+-- Table level. (st.never was vacuumed but never analyzed.)
+SELECT tablename, indexname, key_columns, table_rows_est, small_table, stats_stale,
+       index_bytes > 0 AS has_size, cardinality(extended_stats) AS ext
+  FROM index_deps.index_table_stats WHERE schemaname = 'st' ORDER BY tablename, indexname;
+ tablename |      indexname      | key_columns | table_rows_est | small_table | stats_stale | has_size | ext 
+-----------+---------------------+-------------+----------------+-------------+-------------+----------+-----
+ big       | big_ab_idx          |           2 |          20000 | f           | f           | t        |   0
+ big       | big_low_idx         |           1 |          20000 | f           | f           | t        |   0
+ big       | big_lower_idx       |           1 |          20000 | f           | f           | t        |   0
+ big       | big_lowskew_idx     |           1 |          20000 | f           | f           | t        |   0
+ big       | big_nul_idx         |           1 |          20000 | f           | f           | t        |   0
+ big       | big_nul_partial_idx |           1 |          20000 | f           | f           | t        |   0
+ big       | big_pkey            |           1 |          20000 | f           | f           | t        |   0
+ big       | big_skew_idx        |           1 |          20000 | f           | f           | t        |   0
+ big       | big_uni_idx         |           1 |          20000 | f           | f           | t        |   0
+ ev        | ev_id_idx           |           1 |           3000 | f           | f           | t        |   0
+ ev_1      | ev_1_id_idx         |           1 |           1568 | t           | f           | t        |   0
+ ev_2      | ev_2_id_idx         |           1 |           1432 | t           | f           | t        |   0
+ never     | never_v_idx         |           1 |           5000 | f           | t           | t        |   0
+ small     | small_pkey          |           1 |            100 | t           | f           | t        |   0
+ small     | small_v_idx         |           1 |            100 | t           | f           | t        |   0
+(15 rows)
+
+-- Column level: exact here because ANALYZE read every row.
+SELECT indexname, key_position, column_expr, is_expression, has_stats,
+       round(null_frac::numeric, 2) AS null_frac, distinct_est, skewed,
+       round(top_value_freq::numeric, 2) AS top_freq, histogram_buckets > 0 AS has_histogram
+  FROM index_deps.index_column_stats WHERE schemaname = 'st' AND tablename IN ('big', 'small', 'ev')
+ ORDER BY indexname, key_position;
+      indexname      | key_position | column_expr | is_expression | has_stats | null_frac | distinct_est | skewed | top_freq | has_histogram 
+---------------------+--------------+-------------+---------------+-----------+-----------+--------------+--------+----------+---------------
+ big_ab_idx          |            1 | a           | f             | t         |      0.00 |           50 | f      |     0.02 | f
+ big_ab_idx          |            2 | b           | f             | t         |      0.00 |           50 | f      |     0.02 | f
+ big_low_idx         |            1 | low         | f             | t         |      0.00 |            3 | f      |     0.33 | f
+ big_lower_idx       |            1 | lower(txt)  | t             | t         |      0.00 |          500 | f      |     0.00 | t
+ big_lowskew_idx     |            1 | lowskew     | f             | t         |      0.00 |            3 | t      |     0.95 | f
+ big_nul_idx         |            1 | nul         | f             | t         |      0.90 |         2000 | f      |          | t
+ big_nul_partial_idx |            1 | nul         | f             | t         |      0.90 |         2000 | f      |          | t
+ big_pkey            |            1 | id          | f             | t         |      0.00 |        20000 | f      |          | t
+ big_skew_idx        |            1 | skew        | f             | t         |      0.00 |          201 | t      |     0.99 | t
+ big_uni_idx         |            1 | uni         | f             | t         |      0.00 |        20000 | f      |          | t
+ ev_id_idx           |            1 | id          | f             | t         |      0.00 |         3000 | f      |          | t
+ small_pkey          |            1 | id          | f             | t         |      0.00 |          100 | f      |          | t
+ small_v_idx         |            1 | v           | f             | t         |      0.00 |          100 | f      |          | t
+(13 rows)
+
+-- Hints.
+SELECT i.relname AS indexname, h AS hint
+  FROM pg_class i JOIN pg_namespace n ON n.oid = i.relnamespace
+  CROSS JOIN LATERAL unnest(index_deps.index_hints(i.oid)) AS h
+ WHERE n.nspname = 'st' AND i.relkind IN ('i', 'I') AND i.relname NOT LIKE 'ev\_%\_idx'
+ ORDER BY 1, 2;
+      indexname      |                                                                     hint                                                                     
+---------------------+----------------------------------------------------------------------------------------------------------------------------------------------
+ big_ab_idx          | multicolumn index without extended statistics on its columns: the planner assumes they are independent (CREATE STATISTICS can help)
+ big_ab_idx          | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ big_low_idx         | leading column low has only ~3 distinct values: an equality lookup returns ~33.3% of the table, so the planner rarely uses this index for it
+ big_low_idx         | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ big_lower_idx       | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ big_lowskew_idx     | leading column lowskew is skewed (top value 95.0% of rows): the index helps queries on rare values only
+ big_lowskew_idx     | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ big_nul_idx         | leading column nul is 90% NULL: a partial index WHERE nul IS NOT NULL would be smaller
+ big_nul_idx         | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ big_nul_partial_idx | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ big_pkey            | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ big_skew_idx        | leading column skew is skewed (top value 99.0% of rows): the index helps queries on rare values only
+ big_skew_idx        | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ big_uni_idx         | write cost without reads: not scanned since the statistics reset, but maintained on 20000 inserts and 0 non-HOT updates
+ never_v_idx         | table never analyzed: planner estimates and these hints are guesses; run ANALYZE
+ never_v_idx         | write cost without reads: not scanned since the statistics reset, but maintained on 5000 inserts and 0 non-HOT updates
+ small_pkey          | tiny table (~100 rows in 1 page): the planner may prefer a sequential scan anyway
+ small_pkey          | write cost without reads: not scanned since the statistics reset, but maintained on 100 inserts and 0 non-HOT updates
+ small_v_idx         | tiny table (~100 rows in 1 page): the planner may prefer a sequential scan anyway
+ small_v_idx         | write cost without reads: not scanned since the statistics reset, but maintained on 100 inserts and 0 non-HOT updates
+(20 rows)
+
+-- Extended statistics on (a, b) remove the independence hint.
+CREATE STATISTICS st.big_ab_stats (ndistinct, dependencies) ON a, b FROM st.big;
+ANALYZE st.big;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT extended_stats FROM index_deps.index_table_stats WHERE indexname = 'big_ab_idx';
+ extended_stats 
+----------------
+ {big_ab_stats}
+(1 row)
+
+SELECT count(*) AS independence_hints
+  FROM unnest(index_deps.index_hints('st.big_ab_idx')) AS h WHERE h LIKE 'multicolumn%';
+ independence_hints 
+--------------------
+                  0
+(1 row)
+
+-- Writes since the last analyze make the statistics stale; writes show as cost.
+INSERT INTO st.big (id, uni, low, skew, nul, a, b, txt) SELECT g, g, 0, 0, NULL, 0, 0, 'x' FROM generate_series(20001, 25000) g;
+UPDATE st.big SET txt = txt WHERE id <= 100;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT stats_stale, n_mod_since_analyze >= 5000 AS changed, inserts >= 25000 AS inserts_counted,
+       updates >= 100 AS updates_counted
+  FROM index_deps.index_table_stats WHERE indexname = 'big_uni_idx';
+ stats_stale | changed | inserts_counted | updates_counted 
+-------------+---------+-----------------+-----------------
+ t           | t       | t               | t
+(1 row)
+
+SELECT h LIKE 'statistics stale: % rows changed since the last analyze; run ANALYZE before deciding' AS stale_hint
+  FROM unnest(index_deps.index_hints('st.big_uni_idx')) AS h WHERE h LIKE 'statistics stale%';
+ stale_hint 
+------------
+ t
+(1 row)
+
+-- big_uni_idx was never scanned: maintained on every insert for nothing.
+-- Once a query uses it, the hint goes away.
+SELECT count(*) AS write_cost_hints
+  FROM unnest(index_deps.index_hints('st.big_uni_idx')) AS h WHERE h LIKE 'write cost without reads: % inserts and % non-HOT updates (%HOT)';
+ write_cost_hints 
+------------------
+                1
+(1 row)
+
+SET enable_seqscan = off;
+SELECT count(*) FROM st.big WHERE uni = 7;
+ count 
+-------
+     1
+(1 row)
+
+RESET enable_seqscan;
+SELECT pg_stat_force_next_flush();
+ pg_stat_force_next_flush 
+--------------------------
+ 
+(1 row)
+
+SELECT count(*) AS write_cost_hints_after_scan
+  FROM unnest(index_deps.index_hints('st.big_uni_idx')) AS h WHERE h LIKE 'write cost%';
+ write_cost_hints_after_scan 
+-----------------------------
+                           0
+(1 row)
+
+-- index_drop_impact warns that its estimate rests on stale statistics.
+-- (Rows for INSERT/UPDATE are "skipped: not a read query" and have no estimate.)
+SELECT count(*) > 0 AS evaluated,
+       bool_and(note LIKE '%statistics stale: % rows changed since the last analyze; run ANALYZE before deciding%') AS stale_warned
+  FROM index_deps.index_drop_impact('st.big_uni_idx')
+ WHERE query LIKE '%st.big%' AND note NOT LIKE 'skipped%';
+ evaluated | stale_warned 
+-----------+--------------
+ t         | t
+(1 row)
+
+-- The per-index usage view carries the hints.
+SELECT indexname, cardinality(hints) > 0 AS has_hints
+  FROM index_deps.index_usage WHERE schemaname = 'st' AND indexname IN ('small_v_idx', 'big_uni_idx', 'never_v_idx')
+ ORDER BY indexname;
+  indexname  | has_hints 
+-------------+-----------
+ big_uni_idx | t
+ never_v_idx | t
+ small_v_idx | t
+(3 rows)
+
+DROP SCHEMA st CASCADE;
+NOTICE:  drop cascades to 4 other objects
+DETAIL:  drop cascades to table st.small
+drop cascades to table st.big
+drop cascades to table st.ev
+drop cascades to table st.never
+UPDATE index_deps.config SET value = 'auto' WHERE key = 'plan_source';

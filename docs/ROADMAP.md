@@ -9,8 +9,9 @@
 | 0.5 / SQL edition 0.4 | Index roles and per-index verdicts; drop-impact fixes from the lab; validated on Aurora 17.9 (writer + reader) and RDS 17.11 | Done 24 Oct 2026 |
 | 0.6 (this) | Backend-local batching + sampling GUC (T04) | Done 25 Oct 2026: `select_only` −3.4% → −1.8%, `wide` −2.9% → −0.9% |
 | 0.6.1 | Benchmark `sample_rate` 0.1; profile the hooks and plan walk (`perf`) | **Done 26 Oct 2026**: profile shows the extension at ~0.7% of CPU on `select_only`; `sample_rate` 0.1 gave no measurable gain (noise-bound). Optional: a `--runs 10` run on one instance to show < 1% in TPS |
-| SQL edition 0.5 | Column lists instead of `SELECT *` in its functions and views | Next SQL edition change |
-| 0.7 | Index column usage per query (T07) or `pg_index_sole_path` (T02) | After 0.6.1 |
+| SQL edition 0.5 | Column lists instead of `SELECT *` in its functions and views | Done 26 Oct 2026 |
+| 0.7 / SQL edition 0.6 | **Table and column statistics behind each index (T08)**: row counts, size, write rate and HOT %, staleness; per key column n_distinct, null fraction, MCVs and skew, histogram, correlation, extended statistics; hints in verdicts and drop impact | Requested 26 Oct 2026; next feature |
+| 0.8 | Index column usage per query (T07) or `pg_index_sole_path` (T02) | After T08 |
 | later | PGXN release, PGDG packaging request | Outside users exist |
 
 Stop rule: if 8 weeks after the public release there are no outside users, issues or mentions, stop adding features and keep it as private audit tooling.

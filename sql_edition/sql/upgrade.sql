@@ -29,7 +29,15 @@ SELECT to_regclass('index_deps.index_usage') IS NOT NULL AS usage_present,
        EXISTS (SELECT 1 FROM aclexplode((SELECT relacl FROM pg_class WHERE oid = 'index_deps.config'::regclass)) a
                 WHERE a.grantee = 0 AND a.privilege_type = 'SELECT') AS config_public;
 SELECT value AS plan_source_kept FROM index_deps.config WHERE key = 'plan_source';
--- The upgraded objects must be identical to a fresh 0.4 install.
+-- 0.4 -> 0.5: same objects, written without SELECT *; output unchanged.
+ALTER EXTENSION pg_index_deps UPDATE TO '0.5';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
+-- No function body selects * (expect no rows).
+SELECT p.proname AS uses_select_star
+  FROM pg_proc p
+ WHERE p.pronamespace = 'index_deps'::regnamespace
+   AND p.prosrc ~ '(SELECT \*|\m[a-z_]+\.\*)';
+-- The upgraded objects (0.1 -> ... -> 0.5) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT 'function ' || p.oid::regprocedure::text AS name, pg_get_functiondef(p.oid) AS def
   FROM pg_proc p WHERE p.pronamespace = 'index_deps'::regnamespace

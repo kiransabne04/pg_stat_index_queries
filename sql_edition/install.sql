@@ -1,7 +1,7 @@
--- pg_index_deps 0.4, plain install (generated, do not edit)
+-- pg_index_deps 0.5, plain install (generated, do not edit)
 CREATE SCHEMA IF NOT EXISTS index_deps;
 SET search_path = index_deps, public;
-/* pg_index_deps--0.4.sql
+/* pg_index_deps--0.5.sql
  *
  * SQL edition of pg_stat_index_queries. No C code, so it installs on managed
  * Postgres (Amazon Aurora, RDS) as well as self-hosted servers.
@@ -122,7 +122,8 @@ CREATE FUNCTION index_deps.index_role(
 LANGUAGE sql STABLE
 AS $$
     WITH ix AS (
-        SELECT x.*, i.relkind, i.relispartition,
+        SELECT x.indexrelid, x.indrelid, x.indisunique, x.indisreplident, x.indisclustered,
+               x.indisvalid, x.indpred, x.indexprs, i.relkind, i.relispartition,
                (SELECT ip.inhparent::regclass::text FROM pg_inherits ip
                  WHERE ip.inhrelid = x.indexrelid) AS parent_index,
                to_jsonb(x) ->> 'indnullsnotdistinct' AS nulls_not_distinct
@@ -143,7 +144,10 @@ AS $$
          WHERE f.contype = 'f' AND f.conindid = ix.indexrelid AND f.conparentid = 0
     ),
     r AS (
-        SELECT ix.*, k.conname, k.contype, k.condeferrable, fk.refs,
+        SELECT ix.indexrelid, ix.indrelid, ix.indisunique, ix.indisreplident, ix.indisclustered,
+               ix.indisvalid, ix.indpred, ix.indexprs, ix.relkind, ix.relispartition,
+               ix.parent_index, ix.nulls_not_distinct,
+               k.conname, k.contype, k.condeferrable, fk.refs,
                CASE k.contype WHEN 'p' THEN 'primary key'
                               WHEN 'u' THEN 'unique constraint'
                               WHEN 'x' THEN 'exclusion constraint'
@@ -228,7 +232,8 @@ WITH usage AS (
       FROM index_deps.plan_index_usage u
 ),
 candidates AS (
-    SELECT u.*, i.oid AS indexrelid, n.nspname AS schemaname, t.relname AS tablename,
+    SELECT u.queryid, u.planid, u.calls, u.source, u.scan_type, u.index_name, u.table_hint,
+           i.oid AS indexrelid, n.nspname AS schemaname, t.relname AS tablename,
            count(*) OVER (PARTITION BY u.queryid, u.planid, u.index_name) AS n_candidates
       FROM usage u
       JOIN pg_class i ON i.relname = u.index_name AND i.relkind IN ('i', 'I')
@@ -715,7 +720,9 @@ BEGIN
     -- read them through jsonb so the same text works on every version.
     RETURN QUERY EXECUTE format($q$
         WITH d AS (
-            SELECT * FROM index_deps.index_dependents
+            SELECT schemaname, tablename, indexname, indexrelid, queryid, plans, calls,
+                   scan_types, ambiguous, source, index_role
+              FROM index_deps.index_dependents
         ),
         s AS (
             SELECT p.queryid,
@@ -775,6 +782,13 @@ END;
 $$;
 
 CREATE VIEW index_deps.index_query_stats AS
-    SELECT * FROM index_deps.index_query_stats();
+    SELECT schemaname, tablename, indexname, indexrelid, indexdef, index_bytes, is_unique,
+           is_partial, index_role, index_notes, queryid, index_plans, index_calls,
+           pct_calls_using_index, scan_types, ambiguous, source, other_indexes, calls,
+           total_exec_ms, mean_exec_ms, min_exec_ms, max_exec_ms, plans, total_plan_ms,
+           mean_plan_ms, rows, rows_per_call, shared_blks_hit, shared_blks_read,
+           cache_hit_pct, shared_blks_dirtied, shared_blks_written, temp_blks_read,
+           temp_blks_written, io_read_ms, io_write_ms, wal_bytes, roles, query
+      FROM index_deps.index_query_stats();
 
 GRANT SELECT ON index_deps.index_query_stats TO PUBLIC;

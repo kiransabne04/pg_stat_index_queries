@@ -8,7 +8,7 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.6 (SQL edition 0.4), experimental.** Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
+> **Status: 0.6 (SQL edition 0.5), experimental.** Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 

@@ -1,5 +1,5 @@
 # pg_index_deps: SQL edition of pg_stat_index_queries (no C code)
 comment = 'which queries depend on each index, from captured plans; drop-impact check with HypoPG'
-default_version = '0.4'
+default_version = '0.5'
 schema = index_deps
 relocatable = false

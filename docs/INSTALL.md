@@ -78,6 +78,7 @@ Requires Aurora PostgreSQL 14.10, 15.5 or later for `aurora_stat_plans`; the dro
    \i sql_edition/install_pg_tle.sql
    CREATE EXTENSION pg_index_deps;
    ```
+   SQL edition 0.5 only rewrites internal queries with column lists (no `SELECT *`); nothing changes for users.
    Upgrading to SQL edition 0.4 changes `index_drop_impact`: new last column `drop_blocker`, and `p_timeout_ms` is now a budget for the whole call (default 30000) instead of a per-query timeout that never took effect.
    To upgrade a pg_tle install later, run the newer `install_pg_tle.sql` (it registers the missing update paths and the new default version) and then `ALTER EXTENSION pg_index_deps UPDATE;`.
    The plain install has no upgrade path: `DROP SCHEMA index_deps CASCADE;`, run the newer `install.sql`, and set `plan_source` again if you had changed it.

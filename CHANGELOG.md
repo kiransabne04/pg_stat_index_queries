@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- **SQL edition 0.5** (upgrade script 0.4 → 0.5; installers regenerated): `index_role()`, `index_dependents`, `index_query_stats()` and its view are written with column lists instead of `SELECT *` / `alias.*`. Behaviour and output columns are unchanged. The upgrade test checks that no function body selects `*` and that an upgraded install equals a fresh one. Tests pass on PG 16–18.
+- Planned (T08, `codex/tasks/T08-table-column-stats.md`): show the table and column statistics behind each index next to its usage and drop impact. That means row counts, size, write rate and HOT %, staleness, n_distinct, null fraction, most common values and skew, histogram, correlation and extended statistics. It also means hints such as "tiny table", "low distinct count", "skewed" and "stats stale".
 - **CPU profile of 0.6** (`bench/profile.sh`, new): on pgbench `-S` the extension's own code is about 0.7% of all CPU samples (ExecutorEnd incl. plan walk and local counting ~0.5%, Run/Finish hooks ~0.2%). The larger TPS differences measured are within run-to-run and instance-to-instance noise (up to 6% between instances). A `sample_rate=0.1` run measured −3.3%, no better than recording every statement. Results: `bench/results/2026-10-25-*-sample0.1.md`, `2026-10-26-*-profile.txt`.
 
 ## 0.6 (2026-10-25): native 0.6 (SQL edition unchanged at 0.4)

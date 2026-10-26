@@ -139,7 +139,27 @@ SELECT to_regclass('pg_index_column_usage') IS NOT NULL AS column_usage,
  t            |           3
 (1 row)
 
--- The upgraded objects (0.1 -> ... -> 0.8) must be identical to a fresh install.
+-- 0.8 -> 0.9: pg_index_sole_path (T02).
+SELECT to_regclass('pg_index_sole_path') IS NULL AS sole_path_absent_in_0_8;
+ sole_path_absent_in_0_8 
+-------------------------
+ t
+(1 row)
+
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+ extversion 
+------------
+ 0.9
+(1 row)
+
+SELECT to_regclass('pg_index_sole_path') IS NOT NULL AS sole_path;
+ sole_path 
+-----------
+ t
+(1 row)
+
+-- The upgraded objects (0.1 -> ... -> 0.9) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT CASE d.classid WHEN 'pg_proc'::regclass THEN 'function ' || d.objid::regprocedure::text
                       ELSE 'view ' || d.objid::regclass::text END AS name,

@@ -61,6 +61,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
 
@@ -151,6 +152,15 @@ typedef struct pgsiqWalkContext
 	pgsiqSeenIndex seen[PGSIQ_MAX_INDEXES_PER_STMT];
 } pgsiqWalkContext;
 
+/* A tracked index as it was before a REINDEX (name and schema). */
+typedef struct pgsiqReindexed
+{
+	Oid			oldoid;
+	Oid			newoid;
+	Oid			nspid;
+	char	   *name;
+} pgsiqReindexed;
+
 /* ---------- GUCs ---------- */
 
 typedef enum
@@ -236,6 +246,9 @@ static bool pgsiq_write_file(const pgsiqEntry *entries, int64 count,
 							 int64 dealloc, TimestampTz stats_reset,
 							 bool sampled);
 static void pgsiq_periodic_save(void);
+static inline void mark_dirty(void);
+static pgsiqReindexed *reindex_capture(int *n);
+static void reindex_rekey(pgsiqReindexed *idx, int n);
 
 PG_FUNCTION_INFO_V1(pg_stat_index_queries);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_0_8);
@@ -851,18 +864,206 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	nesting_level++;
 	PG_TRY();
 	{
+		pgsiqReindexed *reindexed = NULL;
+		int			nreindexed = 0;
+
+		/* REINDEX CONCURRENTLY gives indexes new OIDs; carry history over. */
+		if (IsA(parsetree, ReindexStmt))
+			reindexed = reindex_capture(&nreindexed);
+
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 								params, queryEnv, dest, qc);
 		else
 			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
 									params, queryEnv, dest, qc);
+
+		if (reindexed)
+			reindex_rekey(reindexed, nreindexed);
 	}
 	PG_FINALLY();
 	{
 		nesting_level--;
 	}
 	PG_END_TRY();
+}
+
+/* ---------- REINDEX CONCURRENTLY (0.9.1) ---------- */
+
+static int
+oid_cmp_reindexed(const void *lhs, const void *rhs)
+{
+	Oid			l = ((const pgsiqReindexed *) lhs)->oldoid;
+	Oid			r = ((const pgsiqReindexed *) rhs)->oldoid;
+
+	return (l < r) ? -1 : (l > r) ? 1 : 0;
+}
+
+/*
+ * Before a REINDEX: the name and schema of every index tracked in this
+ * database, sorted by OID. Allocated in PortalContext when there is one,
+ * because REINDEX CONCURRENTLY commits transactions while it runs.
+ * Returns NULL when nothing is tracked.
+ */
+static pgsiqReindexed *
+reindex_capture(int *n)
+{
+	MemoryContext old;
+	HASH_SEQ_STATUS hash_seq;
+	pgsiqEntry *entry;
+	pgsiqReindexed *idx;
+	int			nall;
+	int			i;
+	int			j;
+
+	*n = 0;
+	if (!pgsiq || !pgsiq_hash)
+		return NULL;
+
+	/* This session's counts must be under the old OIDs too. */
+	pgsiq_flush(true);
+
+	old = MemoryContextSwitchTo(PortalContext ? PortalContext : CurrentMemoryContext);
+
+	LWLockAcquire(pgsiq->lock, LW_SHARED);
+	idx = palloc_extended(Max(hash_get_num_entries(pgsiq_hash), 1) *
+						  sizeof(pgsiqReindexed), MCXT_ALLOC_HUGE);
+	nall = 0;
+	hash_seq_init(&hash_seq, pgsiq_hash);
+	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+		if (entry->key.dbid == MyDatabaseId)
+			idx[nall++].oldoid = entry->key.indexrelid;
+	LWLockRelease(pgsiq->lock);
+
+	qsort(idx, nall, sizeof(pgsiqReindexed), oid_cmp_reindexed);
+
+	/* Distinct OIDs that still exist, with their names. */
+	j = 0;
+	for (i = 0; i < nall; i++)
+	{
+		char	   *name;
+
+		if (j > 0 && idx[j - 1].oldoid == idx[i].oldoid)
+			continue;
+		name = get_rel_name(idx[i].oldoid);
+		if (name == NULL)
+			continue;
+		idx[j].oldoid = idx[i].oldoid;
+		idx[j].newoid = InvalidOid;
+		idx[j].nspid = get_rel_namespace(idx[i].oldoid);
+		idx[j].name = name;
+		j++;
+	}
+
+	MemoryContextSwitchTo(old);
+
+	if (j == 0)
+	{
+		pfree(idx);
+		return NULL;
+	}
+	*n = j;
+	return idx;
+}
+
+/*
+ * After a REINDEX: an index whose old OID is gone and whose name now
+ * belongs to a different OID was rebuilt concurrently. Move its entries to
+ * the new OID, merging with any the new index already has. Other sessions'
+ * not yet flushed counts still arrive under the old OID, which the views
+ * ignore.
+ */
+static void
+reindex_rekey(pgsiqReindexed *idx, int n)
+{
+	HASH_SEQ_STATUS hash_seq;
+	pgsiqEntry *entry;
+	pgsiqEntry *moved;
+	int			nmoved = 0;
+	int			nchanged = 0;
+	int			i;
+
+	for (i = 0; i < n; i++)
+	{
+		Oid			newoid = get_relname_relid(idx[i].name, idx[i].nspid);
+		char	   *oldname = get_rel_name(idx[i].oldoid);
+
+		if (oldname == NULL && OidIsValid(newoid) && newoid != idx[i].oldoid)
+		{
+			idx[i].newoid = newoid;
+			nchanged++;
+		}
+		if (oldname)
+			pfree(oldname);
+	}
+
+	if (nchanged > 0)
+	{
+		pgsiq_flush(true);
+
+		LWLockAcquire(pgsiq->lock, LW_EXCLUSIVE);
+
+		moved = palloc_extended(Max(hash_get_num_entries(pgsiq_hash), 1) *
+								sizeof(pgsiqEntry), MCXT_ALLOC_HUGE);
+		hash_seq_init(&hash_seq, pgsiq_hash);
+		while ((entry = hash_seq_search(&hash_seq)) != NULL)
+		{
+			pgsiqReindexed key;
+			pgsiqReindexed *r;
+
+			if (entry->key.dbid != MyDatabaseId)
+				continue;
+			key.oldoid = entry->key.indexrelid;
+			r = bsearch(&key, idx, n, sizeof(pgsiqReindexed), oid_cmp_reindexed);
+			if (r == NULL || !OidIsValid(r->newoid))
+				continue;
+			moved[nmoved] = *entry;
+			moved[nmoved].key.indexrelid = r->newoid;
+			nmoved++;
+			/* Removing the element just returned is allowed during a scan. */
+			hash_search(pgsiq_hash, &entry->key, HASH_REMOVE, NULL);
+		}
+
+		/* Exclusive lock held: no spinlocks needed. */
+		for (i = 0; i < nmoved; i++)
+		{
+			pgsiqEntry *m = &moved[i];
+			bool		found;
+
+			entry = (pgsiqEntry *) hash_search(pgsiq_hash, &m->key,
+											   HASH_ENTER, &found);
+			if (!found)
+			{
+				SpinLockInit(&entry->mutex);
+				entry->calls_executed = m->calls_executed;
+				entry->calls_planned = m->calls_planned;
+				entry->first_seen = m->first_seen;
+				entry->last_seen = m->last_seen;
+				entry->cond_cols = m->cond_cols;
+				entry->order_cols = m->order_cols;
+				entry->cols_complete = m->cols_complete;
+				continue;
+			}
+			entry->calls_executed += m->calls_executed;
+			entry->calls_planned += m->calls_planned;
+			if (m->first_seen < entry->first_seen)
+				entry->first_seen = m->first_seen;
+			if (m->last_seen > entry->last_seen)
+				entry->last_seen = m->last_seen;
+			entry->cond_cols |= m->cond_cols;
+			entry->order_cols |= m->order_cols;
+			entry->cols_complete = entry->cols_complete && m->cols_complete;
+		}
+
+		LWLockRelease(pgsiq->lock);
+		pfree(moved);
+		if (nmoved > 0)
+			mark_dirty();
+	}
+
+	for (i = 0; i < n; i++)
+		pfree(idx[i].name);
+	pfree(idx);
 }
 
 /* ---------- plan walk + capture ---------- */

@@ -13,8 +13,7 @@
 | 0.7 / SQL edition 0.6 | **Table and column statistics behind each index (T08)**: row counts, size, write rate and HOT %, staleness; per key column n_distinct, null fraction, MCVs and skew, histogram, correlation, extended statistics; hints in verdicts and drop impact | **Done 26 Oct 2026** (unreleased): tests pass on PG 15–18; lab 0 FAIL on PG 16–18 |
 | 0.8 | **Index column usage per query (T07)**: `cond_columns` / `order_columns` per (index, query), `pg_index_column_usage` | Done 26 Oct 2026: tests pass on PG 15–18; benchmark 0.7 vs 0.8 on one instance shows no added cost (`select_only` −3.4% both, `wide` −4.6% → −2.1%, all within noise) |
 | 0.9 | `pg_index_sole_path` (T02): per (index, query) risk `high` / `medium` / `low` | Tests pass on PG 15–18 (26 Oct 2026, unreleased) |
-| 0.9.1 | **Periodic saves (T09)**: `save_interval` (default 300 s), background worker; a crash loses minutes, not the whole window | Tests pass on PG 15–18 (27 Oct 2026, unreleased) |
-| later | Keep an index's history across `REINDEX CONCURRENTLY` (new OID) | Next after T09 |
+| 0.9.1 | **Periodic saves (T09)**: `save_interval` (default 300 s), background worker; a crash loses minutes, not the whole window. **History kept across `REINDEX CONCURRENTLY` (T10)** | Tests pass on PG 15–18 (27 Oct 2026, unreleased) |
 | later | PGXN release, PGDG packaging request | Outside users exist |
 
 Stop rule: if 8 weeks after the public release there are no outside users, issues or mentions, stop adding features and keep it as private audit tooling.

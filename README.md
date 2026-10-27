@@ -133,7 +133,7 @@ The cost is per statement, so it shows on tiny read-only statements. Batching (0
 ## Tests
 
 ```bash
-make installcheck                 # native: 9 regression suites + 5 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets, periodic saves)
+make installcheck                 # native: 10 regression suites + 5 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets, periodic saves)
 make -C sql_edition installcheck  # SQL edition: 7 suites: parsing, live pg_stat_plans, drop-impact, statistics, upgrades (needs pg_stat_plans + HypoPG)
 make test-all                     # both
 ```

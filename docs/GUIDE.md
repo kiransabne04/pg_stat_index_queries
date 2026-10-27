@@ -222,6 +222,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 - **Nested statements** (inside functions, DO, CALL, EXPLAIN ANALYZE, CREATE TABLE AS) are recorded with `toplevel = false`, and only with `track = all`. EXECUTE and PREPARE count as top level, as in pg_stat_statements.
 - **Constraint indexes.** Primary keys, unique and exclusion constraints, foreign-key targets, replica identity and clustered indexes get a `drop_blocker` and are never drop candidates.
 - **Invalid indexes** are reported as invalid, not unused.
+- **REINDEX CONCURRENTLY** (native, 0.9.1): the rebuilt index keeps its history and column sets under its new OID. Plain REINDEX keeps the OID anyway.
 - **Partitions.** Partition indexes fold into the parent; attached partition indexes are never listed on their own, since they can't be dropped separately.
 - **Upgrades.**
   - Counters saved by an older version are read after the upgrade.
@@ -252,7 +253,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
    - Queries evicted from pg_stat_statements or the plan source are invisible.
    - A renamed index loses its history, and its verdict is "unknown".
    - Plain RDS has no plan source. There is no dependents list there; `index_drop_impact` finds candidate queries by matching pg_stat_statements text.
-9. **A recreated index is a new index.** DROP/CREATE or `REINDEX CONCURRENTLY` gives it a new OID, and its history starts at zero.
+9. **A recreated index is a new index.** DROP INDEX + CREATE INDEX gives it a new OID, and its history starts at zero. `REINDEX CONCURRENTLY` also gives a new OID, but since 0.9.1 the native extension moves the history to it; counts other sessions hadn't flushed yet (up to `flush_interval`) are lost, and a `REINDEX SCHEMA/DATABASE CONCURRENTLY` that fails part-way doesn't move the history of the tables it already finished.
 10. **Column usage doesn't cover two cases.**
     - A plain ordered scan (ORDER BY on the index columns) and index-only coverage don't name columns. A column "not searched on" can still be needed for them.
     - Only key columns 1–32 are recorded.

@@ -3,7 +3,7 @@
 ## Native extension (`pg_stat_index_queries.c`)
 
 ```
-ExecutorRun / ExecutorFinish / ProcessUtility   -> track nesting level only
+ExecutorRun / ExecutorFinish / ProcessUtility   -> track nesting level; ProcessUtility also re-keys entries after REINDEX CONCURRENTLY (0.9.1)
 ExecutorEnd                                     -> walk PlanState tree, add index OIDs to a backend-local pending table
 before_shmem_exit (backend)                     -> flush pending counts when the session ends
 shmem_request / shmem_startup                   -> shared hash + LWLock tranche; load saved file
@@ -20,6 +20,9 @@ background worker "saver" (0.9.1)               -> save file every save_interval
 5. De-duplicate per statement (up to 64 distinct indexes; more are dropped and the overflow is ignored).
 6. Skip catalog indexes (`oid < FirstNormalObjectId`) unless `track_catalog`.
 7. **Sampling (0.6):** with `sample_rate` < 1 a statement is recorded with that probability (`pg_prng_double`), and its counts are multiplied by `rint(1 / sample_rate)`. A skipped statement sets a shared `sampled` flag (written only when it was not already set), shown by `pg_stat_index_queries_sampled()` and used by `pg_index_usage` to report "unknown" instead of "no recorded use".
+
+### REINDEX CONCURRENTLY (0.9.1)
+REINDEX CONCURRENTLY swaps in a new index (new OID) under the old name and drops the old one. For every `ReindexStmt` the ProcessUtility hook flushes the session's counts and records name + schema of each index tracked in the current database (allocated in `PortalContext`, which survives the command's internal commits). After the command succeeds, an index whose old OID is gone and whose name resolves to another OID gets its entries moved under the exclusive lock, merged with entries the new index already has. Plain REINDEX keeps the OID, so nothing moves. Not moved: other sessions' unflushed counts, and tables finished by a SCHEMA/DATABASE run that later failed.
 
 ### Nesting
 `EXECUTE` and `PREPARE` don't increase nesting (same as pg_stat_statements), so SQL-level prepared statements count as top level. Statements inside DO blocks, functions, CALL, EXPLAIN ANALYZE count as nested.

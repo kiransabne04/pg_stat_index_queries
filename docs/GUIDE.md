@@ -270,10 +270,11 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 
 ## Overhead
 
-The cost is per statement, so it shows most on tiny read-only statements. The runs below were on AWS `c7gd.xlarge`, PG 17.11, pgbench scale 100, 3 × 300 s per mode:
+The cost is per statement, so it shows most on tiny read-only statements. Measured on AWS `c7gd.xlarge`, PG 17.11, pgbench scale 100:
 
-- **TPS, best run on 0.6:** `select_only` −1.8% and `wide` −0.9%. Runs on other instances measured up to −3.4% / −4.6%, because instances alone differ by up to 6%.
-- **CPU profile:** the extension's own code is about 0.7% of all CPU samples.
+- **TPS (0.9, 10 × 120 s per mode, one instance):** `select_only` **−3.3%** (95% interval −4.4% to −2.2%) and `wide` **−2.9%** (−4.1% to −1.7%); `on` was slower in all 10 runs of both. Read/write `tpcb`: no measurable difference. Budget about 3% on a server doing mostly tiny primary-key lookups.
+- **Earlier 3-run results** (0.6: −1.8% / −0.9%) were within noise and too optimistic.
+- **CPU profile:** the extension's own functions are about 0.7% of all CPU samples, less than the TPS cost; where the rest goes is not yet known.
 - **0.8:** recording index columns adds no measurable cost over 0.7 on the same instance.
 
 Details and raw results: README "Overhead" and [BENCHMARK.md](BENCHMARK.md).

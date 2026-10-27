@@ -34,6 +34,10 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.5 → 0.6:** install the new build, **restart** (the library changed: backend-local batching and sampling), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.6';`. Saved counters from 0.5 are kept across the restart. New settings `flush_interval` and `sample_rate`; see README.
 
+**Upgrading 0.7 → 0.8:** install the new build, **restart** (the library changed: entries now record index columns), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.8';`. Saved counters from 0.7 are kept across the restart, marked `columns_complete = false`; `pg_stat_index_queries_reset()` starts a complete column record. The update drops and recreates `pg_stat_index_queries`, `pg_index_dependents`, `pg_index_dependents_rollup`, `pg_index_no_dependents` and `pg_index_usage` (the function's result type changes), so your own views on them must be dropped first. New view `pg_index_column_usage`.
+
+**Upgrading 0.8 → 0.9:** no restart (SQL only): `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';`. Adds the view `pg_index_sole_path`; nothing is dropped.
+
 **Upgrading 0.6 → 0.7:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.7';` (adds `pg_index_table_stats`, `pg_index_column_stats` and `pg_index_hints()`; `pg_index_usage` gains a last column `hints`). SQL only, no restart.
 
 **Upgrading 0.4 → 0.5:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.5';` (adds `pg_index_role()` and `pg_index_usage`; `pg_index_dependents` gains `index_role`; `pg_index_query_stats` gains `index_role` and `index_notes` after `is_partial`, so `SELECT *` column positions change). SQL only, no restart.

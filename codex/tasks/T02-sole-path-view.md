@@ -1,5 +1,7 @@
 # T02 — Add `pg_index_sole_path` view (version 0.3)
 
+> **Status: done 26 Oct 2026 as native 0.9** (not 0.3; versions 0.3–0.8 went to other work). Extra column `other_indexes`; partition indexes fold into the parent. See `docs/DECISIONS.md`.
+
 ## Goal
 For each index, list queries for which it is the only index recorded on its table, with a risk level.
 

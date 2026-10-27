@@ -1,4 +1,6 @@
-# T07 — Record which index columns each query uses (native 0.7)
+# T07 — Record which index columns each query uses (native 0.8)
+
+**Status: implemented 26 Oct 2026 as native 0.8** (0.7 went to T08): symbol `pg_stat_index_queries_0_8`, upgrade script `--0.7--0.8.sql`. Deviation: pre-0.8 stats files are still read and their entries flagged `columns_complete = false` instead of being ignored (see DECISIONS). Benchmark pending.
 
 ## Goal
 For every (database, index, queryid, toplevel) entry, record which key columns of the index the query actually used, so users can see e.g. "index (a, b, c) is only ever searched on a" and spot redundant trailing columns or indexes that a shorter one could replace.

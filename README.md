@@ -8,7 +8,7 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.6 (SQL edition 0.5), experimental.** Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
+> **Status: 0.9 (SQL edition 0.6), experimental.** New here? Read the [user guide](docs/GUIDE.md): use cases, edge cases and limits. Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 
@@ -70,8 +70,10 @@ SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.ind
 
 | Object | What it gives you |
 |---|---|
-| `pg_stat_index_queries` | Raw counters: dbid, indexrelid, queryid, toplevel, calls_executed, calls_planned, first_seen, last_seen |
-| `pg_index_dependents` | Same, with schema, table and index names, current database, and `index_role` |
+| `pg_stat_index_queries` | Raw counters: dbid, indexrelid, queryid, toplevel, calls_executed, calls_planned, first_seen, last_seen, and (0.8) `cond_columns` / `order_columns` (index column numbers the query searched on / ordered by through the index, e.g. KNN; from scans that ran) and `columns_complete` (false for counts loaded from a pre-0.8 stats file) |
+| `pg_index_dependents` | Same, with schema, table and index names, current database, `index_role`, and `cond_columns` / `order_columns` as column names or expressions |
+| `pg_index_column_usage` | One row per key column of each index (partitions folded into the parent): queries using the index, queries and calls that searched on this column, queries that ordered by it, queries whose columns are unknown (recorded before 0.8), and a `note` for a column no recorded query searched on (a shorter index may do, unless it serves ORDER BY or index-only scans). Plain ordered scans and index-only coverage don't name columns |
+| `pg_index_sole_path` | (0.9) One row per (index, query), partitions folded into the parent: calls_executed, last_seen, `other_indexes` (other indexes on the same table the query executed with) and `risk`: `high` = the only index on its table the query executed with, so dropping it changes that query's plan; `medium` = the query also used other indexes on that table; `low` = planned, never executed. Recorded use only: an index the query never used can still be its fallback |
 | `pg_index_usage` | One row per index (partitions folded into the parent): `index_role`, `index_notes`, `drop_blocker`, queries and calls since `tracked_since`, and a `verdict` (used / drop candidate / no use but needed, e.g. enforces a primary key / invalid / unknown after evictions), and `hints` (0.7, from `pg_index_hints`) |
 | `pg_index_role(index)` | What an index is for besides speed: `index_role` (primary key, unique constraint, exclusion constraint, unique index, index), `index_notes` (referenced by foreign keys, replica identity, clustered, invalid, partial, expression, partition) and `drop_blocker` (why DROP INDEX fails or changes behaviour) |
 | `pg_index_table_stats` | Table-level context per index (from the statistics PostgreSQL already keeps; never reads table data): `table_rows_est` (NULL if never analyzed), pages and bytes, `index_bytes` and `index_to_table_pct`, live/dead rows, inserts/updates/deletes and `hot_update_pct`, seq and index scans, `last_idx_scan` (PG 16+), `last_analyzed`, `n_mod_since_analyze`, `stats_stale` (never analyzed, or more than 50 + 10% of rows changed since), `small_table` (< 1,000 rows or < 8 pages), `extended_stats` on the index's columns. Partitioned tables are summed over their leaf partitions |
@@ -125,11 +127,13 @@ The cost is per statement, so it shows on tiny read-only statements. Batching (0
 
 **CPU profile** of pgbench `-S` with 0.6 defaults, all CPUs, 60 s ([profile](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v06-profile.txt), `bench/profile.sh`): the extension's own code is about **0.7% of all CPU samples**. The ExecutorEnd hook, including the plan walk and local counting, is about 0.5%; the ExecutorRun/ExecutorFinish hooks are about 0.2%. The rest of the measured `select_only` difference is run-to-run noise: spreads are 2–4%, and TPS differs by up to 6% between instances of the same type. A [`sample_rate=0.1` run](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06-sample0.1.md) measured −3.3%, which is no better than recording every statement, and only noise explains that. So `sample_rate` doesn't buy measurable speed on this workload; it exists for very large statement rates. `bench/aws-ec2.sh` and `bench/profile.sh` rerun all of this.
 
+**0.8 (column tracking)** vs 0.7 on one instance ([0.7](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v07-base.md), [0.8](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v08.md)): `select_only` −3.40% on both, `wide` −4.55% on 0.7 and −2.10% on 0.8, all within the spreads. Recording index columns adds no measurable cost.
+
 ## Tests
 
 ```bash
-make installcheck                 # native: 6 regression suites + 3 TAP tests (persistence incl. a real crash, eviction, flush across sessions)
-make -C sql_edition installcheck  # SQL edition: parsing, live pg_stat_plans, drop-impact (needs pg_stat_plans + HypoPG)
+make installcheck                 # native: 9 regression suites + 4 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets)
+make -C sql_edition installcheck  # SQL edition: 7 suites: parsing, live pg_stat_plans, drop-impact, statistics, upgrades (needs pg_stat_plans + HypoPG)
 make test-all                     # both
 ```
 
@@ -137,6 +141,7 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 
 ## Docs
 
+- [docs/GUIDE.md](docs/GUIDE.md): user guide: what it answers, use cases with queries, edge cases and limits
 - [docs/INSTALL.md](docs/INSTALL.md): self-hosted, RDS, Aurora
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how it works inside
 - [docs/TESTING.md](docs/TESTING.md): test suites, what is and isn't verified

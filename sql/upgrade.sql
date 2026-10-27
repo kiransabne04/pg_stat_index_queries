@@ -32,7 +32,19 @@ SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
 SELECT to_regclass('pg_index_table_stats') IS NOT NULL AS table_stats,
        to_regclass('pg_index_column_stats') IS NOT NULL AS column_stats,
        to_regprocedure('pg_index_hints(regclass)') IS NOT NULL AS hints;
--- The upgraded objects (0.1 -> ... -> 0.7) must be identical to a fresh install.
+-- 0.7 -> 0.8: column sets per query (T07); pg_index_column_usage.
+SELECT to_regclass('pg_index_column_usage') IS NULL AS column_usage_absent_in_0_7;
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.8';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+SELECT to_regclass('pg_index_column_usage') IS NOT NULL AS column_usage,
+       count(*) FILTER (WHERE attname IN ('cond_columns', 'order_columns', 'columns_complete')) AS new_columns
+  FROM pg_attribute WHERE attrelid = 'pg_stat_index_queries'::regclass AND attnum > 0;
+-- 0.8 -> 0.9: pg_index_sole_path (T02).
+SELECT to_regclass('pg_index_sole_path') IS NULL AS sole_path_absent_in_0_8;
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+SELECT to_regclass('pg_index_sole_path') IS NOT NULL AS sole_path;
+-- The upgraded objects (0.1 -> ... -> 0.9) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT CASE d.classid WHEN 'pg_proc'::regclass THEN 'function ' || d.objid::regprocedure::text
                       ELSE 'view ' || d.objid::regclass::text END AS name,

@@ -109,13 +109,24 @@ SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.ind
 | `pg_stat_index_queries.max` | 10000 | Tracked (index, query) pairs. Restart to change. Least recently seen evicted when full |
 | `pg_stat_index_queries.track` | `top` | `top`, `all` (include statements inside functions), `none` |
 | `pg_stat_index_queries.track_catalog` | off | Also track system catalog indexes |
-| `pg_stat_index_queries.save` | on | Keep counters across clean restarts (lost on crash) |
+| `pg_stat_index_queries.save` | on | Keep counters across restarts |
+| `pg_stat_index_queries.save_interval` | 300s | Also save every this often (when they changed), so a crash loses at most this much. `0` = only at clean shutdown (a crash then loses everything) |
 | `pg_stat_index_queries.flush_interval` | 1s | Each session counts in its own memory and moves the counts to shared memory this often (and when it disconnects). Other sessions see them up to this late; a session always sees its own. `0` = after every statement (0.5 behaviour, slower) |
 | `pg_stat_index_queries.sample_rate` | 1.0 | Fraction of statements recorded; counts are scaled up. Below 1, counts are estimates and `pg_index_usage` reports unused indexes as "unknown" (a rarely used index can be missed) |
 
 ## Overhead
 
-Measured on AWS `c7gd.xlarge`: 4 Graviton3 vCPU, non-burstable, data on local NVMe. PostgreSQL 17.11, pgbench scale 100, 4 clients, 3 × 300 s per mode, with modes interleaved. Raw results: [0.6](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06.md), [0.6 with `flush_interval=0`](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06-flush0.md), [0.5](bench/results/2026-10-24-aws-c7gd.xlarge-pg17.md).
+**Current answer (0.9, 27 Oct 2026, 10 runs):** about **−3%** TPS on tiny read-only statements, not under 1%. On one c7gd.xlarge instance, PG 17.11, scale 100, 4 clients, 10 × 120 s per mode, interleaved ([raw](bench/results/2026-10-27-aws-c7gd.xlarge-pg17-runs10.md)). Paired by run (on vs the `off` run next to it):
+
+| Workload | Mean change | 95% interval | `on` slower in |
+|---|---|---|---|
+| `select_only` | **−3.3%** | −4.4% to −2.2% | 10 of 10 runs |
+| `wide` | **−2.9%** | −4.1% to −1.7% | 10 of 10 runs |
+| `tpcb` | +0.4% | −2.2% to +3.0% | 7 of 10 (noise) |
+
+So the cost is real and steady, and the earlier −1.8% / −0.9% (0.6, 3 runs) was the lucky end of the noise. On write-heavy workloads (`tpcb`) it isn't measurable. The CPU profile below (0.7% of samples in the extension's own functions) doesn't account for the gap; finding where the rest goes is open.
+
+History: measured on AWS `c7gd.xlarge`: 4 Graviton3 vCPU, non-burstable, data on local NVMe. PostgreSQL 17.11, pgbench scale 100, 4 clients, 3 × 300 s per mode, with modes interleaved. Raw results: [0.6](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06.md), [0.6 with `flush_interval=0`](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06-flush0.md), [0.5](bench/results/2026-10-24-aws-c7gd.xlarge-pg17.md).
 
 | Workload | 0.5 | 0.6 (default, batching) | 0.6, `flush_interval=0` |
 |---|---|---|---|
@@ -123,16 +134,16 @@ Measured on AWS `c7gd.xlarge`: 4 Graviton3 vCPU, non-burstable, data on local NV
 | `wide` (20-index table, 3 statements per transaction) | −2.9% | **−0.9%** | not run |
 | `tpcb` (pgbench default, read/write) | +1.7% (noise) | +2.1% (noise) | not run |
 
-The cost is per statement, so it shows on tiny read-only statements. Batching (0.6) removes the shared-memory write from every statement. That roughly halves the overhead on `select_only`, and brings `wide` under 1%. The same machine with `flush_interval=0` (the 0.5 path) still costs 3%, so the gain comes from batching.
+The cost is per statement, so it shows on tiny read-only statements. Batching (0.6) removes the shared-memory write from every statement. These 3-run numbers suggested it halved the overhead; the 10-run measurement above (−3.3% / −2.9%) doesn't confirm that, so treat the batching gain as unproven.
 
-**CPU profile** of pgbench `-S` with 0.6 defaults, all CPUs, 60 s ([profile](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v06-profile.txt), `bench/profile.sh`): the extension's own code is about **0.7% of all CPU samples**. The ExecutorEnd hook, including the plan walk and local counting, is about 0.5%; the ExecutorRun/ExecutorFinish hooks are about 0.2%. The rest of the measured `select_only` difference is run-to-run noise: spreads are 2–4%, and TPS differs by up to 6% between instances of the same type. A [`sample_rate=0.1` run](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06-sample0.1.md) measured −3.3%, which is no better than recording every statement, and only noise explains that. So `sample_rate` doesn't buy measurable speed on this workload; it exists for very large statement rates. `bench/aws-ec2.sh` and `bench/profile.sh` rerun all of this.
+**CPU profile** of pgbench `-S` with 0.6 defaults, all CPUs, 60 s ([profile](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v06-profile.txt), `bench/profile.sh`): the extension's own code is about **0.7% of all CPU samples**. The ExecutorEnd hook, including the plan walk and local counting, is about 0.5%; the ExecutorRun/ExecutorFinish hooks are about 0.2%. At the time we read the rest of the `select_only` difference as noise (spreads 2–4%, instances differ by up to 6%); the 10-run measurement shows it isn't. A [`sample_rate=0.1` run](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06-sample0.1.md) measured −3.3%, which is no better than recording every statement, and only noise explains that. So `sample_rate` doesn't buy measurable speed on this workload; it exists for very large statement rates. `bench/aws-ec2.sh` and `bench/profile.sh` rerun all of this.
 
 **0.8 (column tracking)** vs 0.7 on one instance ([0.7](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v07-base.md), [0.8](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v08.md)): `select_only` −3.40% on both, `wide` −4.55% on 0.7 and −2.10% on 0.8, all within the spreads. Recording index columns adds no measurable cost.
 
 ## Tests
 
 ```bash
-make installcheck                 # native: 9 regression suites + 4 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets)
+make installcheck                 # native: 10 regression suites + 5 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets, periodic saves)
 make -C sql_edition installcheck  # SQL edition: 7 suites: parsing, live pg_stat_plans, drop-impact, statistics, upgrades (needs pg_stat_plans + HypoPG)
 make test-all                     # both
 ```
@@ -153,7 +164,7 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 
 - Native extension: self-hosted only (RDS/Aurora don't allow custom C extensions).
 - Bitmap Index Scans always count as executed (Postgres builds their scan state at startup).
-- Counters are lost on crash (saved only at clean shutdown).
+- A crash loses the counts since the last periodic save (`save_interval`, default 5 minutes).
 - SQL edition only sees queries whose plans were captured, and loses ones evicted from pg_stat_statements.
 - `pg_index_query_stats` / `index_query_stats`: timing and buffers are per statement, not per index; a query using three indexes shows the same numbers on all three rows. `pct_calls_using_index` compares counters that are reset separately, so it can exceed 100 after a reset of one but not the other.
 - Drop-impact uses generic-plan cost estimates, not measured latency. When the generic plan can't use the index although real plans did (typically a partial index whose predicate has a constant), the row says `unknown:` with `plan_changed` NULL: check that query with EXPLAIN and real values.

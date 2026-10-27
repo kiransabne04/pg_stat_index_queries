@@ -1,0 +1,71 @@
+-- 0.9.1 (T10): REINDEX CONCURRENTLY gives an index a new OID; its history
+-- moves to the new OID. Plain REINDEX keeps the OID and the counts.
+CREATE TABLE rx (id int PRIMARY KEY, a int, b int);
+CREATE INDEX rx_a_idx ON rx (a);
+CREATE INDEX rx_b_idx ON rx (b);
+CREATE TABLE rx_ev (id int, at date) PARTITION BY RANGE (at);
+CREATE TABLE rx_ev_1 PARTITION OF rx_ev FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');
+CREATE TABLE rx_ev_2 PARTITION OF rx_ev FOR VALUES FROM ('2026-07-01') TO ('2027-01-01');
+CREATE INDEX rx_ev_at_idx ON rx_ev (at);
+INSERT INTO rx SELECT g, g % 100, g % 7 FROM generate_series(1, 5000) g;
+INSERT INTO rx_ev SELECT g, date '2026-01-01' + (g % 360) FROM generate_series(1, 2000) g;
+VACUUM ANALYZE rx, rx_ev;
+SET enable_seqscan = off;
+
+SELECT pg_stat_index_queries_reset();
+SELECT count(*) FROM rx WHERE a = 5;
+SELECT count(*) FROM rx WHERE a = 5;
+SELECT count(*) FROM rx WHERE b = 3;
+SELECT count(*) FROM rx WHERE id = 7;
+SELECT count(*) FROM rx_ev WHERE at = date '2026-03-01';
+
+-- Old OIDs, to check nothing is left under them.
+CREATE TEMP TABLE rx_old AS
+SELECT c.relname, c.oid
+  FROM pg_class c
+ WHERE c.relname IN ('rx_a_idx', 'rx_b_idx', 'rx_pkey', 'rx_ev_1_at_idx', 'rx_ev_2_at_idx');
+
+CREATE VIEW rx_counts AS
+SELECT c.relname, coalesce(sum(s.calls_executed), 0) AS calls
+  FROM pg_class c
+  LEFT JOIN pg_stat_index_queries s ON s.indexrelid = c.oid
+ WHERE c.relname IN ('rx_a_idx', 'rx_b_idx', 'rx_pkey', 'rx_ev_1_at_idx', 'rx_ev_2_at_idx')
+ GROUP BY c.relname
+ ORDER BY c.relname;
+
+SELECT relname, calls FROM rx_counts;
+
+-- One index.
+REINDEX INDEX CONCURRENTLY rx_a_idx;
+SELECT relname, calls FROM rx_counts;
+SELECT (SELECT oid FROM rx_old WHERE relname = 'rx_a_idx') <> 'rx_a_idx'::regclass::oid AS new_oid;
+
+-- All indexes of a table, and a partitioned index (its leaf indexes).
+REINDEX TABLE CONCURRENTLY rx;
+REINDEX INDEX CONCURRENTLY rx_ev_at_idx;
+SELECT relname, calls FROM rx_counts;
+SELECT count(*) AS left_under_old_oids
+  FROM pg_stat_index_queries s JOIN rx_old o ON o.oid = s.indexrelid;
+
+-- Column sets move with the counts.
+SELECT cond_columns FROM pg_stat_index_queries WHERE indexrelid = 'rx_a_idx'::regclass;
+
+-- Counting continues on the new OID.
+SELECT count(*) FROM rx WHERE a = 5;
+SELECT relname, calls FROM rx_counts WHERE relname = 'rx_a_idx';
+
+-- Plain REINDEX: same OID, counts unchanged.
+CREATE TEMP TABLE rx_b_before AS SELECT 'rx_b_idx'::regclass::oid AS oid;
+REINDEX INDEX rx_b_idx;
+SELECT (SELECT oid FROM rx_b_before) = 'rx_b_idx'::regclass::oid AS same_oid;
+SELECT relname, calls FROM rx_counts WHERE relname = 'rx_b_idx';
+
+-- An index dropped and created again under the same name is a new index:
+-- not a REINDEX, so its history is not carried over.
+DROP INDEX rx_b_idx;
+CREATE INDEX rx_b_idx ON rx (b);
+SELECT relname, calls FROM rx_counts WHERE relname = 'rx_b_idx';
+
+RESET enable_seqscan;
+DROP VIEW rx_counts;
+DROP TABLE rx, rx_ev;

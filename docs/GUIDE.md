@@ -211,7 +211,8 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 | `pg_stat_index_queries.max` | 10000 | Tracked (index, query) pairs. Restart to change |
 | `pg_stat_index_queries.track` | `top` | `all` also records statements inside functions; `none` stops recording |
 | `pg_stat_index_queries.track_catalog` | off | Also record system catalog indexes |
-| `pg_stat_index_queries.save` | on | Keep counters across clean restarts |
+| `pg_stat_index_queries.save` | on | Keep counters across restarts |
+| `pg_stat_index_queries.save_interval` | 300s | Also save every this often, when the counters changed. A crash then loses at most this much. `0` = only at clean shutdown |
 | `pg_stat_index_queries.flush_interval` | 1s | `0` moves counts to shared memory after every statement (slower) |
 | `pg_stat_index_queries.sample_rate` | 1.0 | Below 1, counts are scaled estimates and unused indexes are reported as "unknown" |
 
@@ -221,6 +222,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 - **Nested statements** (inside functions, DO, CALL, EXPLAIN ANALYZE, CREATE TABLE AS) are recorded with `toplevel = false`, and only with `track = all`. EXECUTE and PREPARE count as top level, as in pg_stat_statements.
 - **Constraint indexes.** Primary keys, unique and exclusion constraints, foreign-key targets, replica identity and clustered indexes get a `drop_blocker` and are never drop candidates.
 - **Invalid indexes** are reported as invalid, not unused.
+- **REINDEX CONCURRENTLY** (native, 0.9.1): the rebuilt index keeps its history and column sets under its new OID. Plain REINDEX keeps the OID anyway.
 - **Partitions.** Partition indexes fold into the parent; attached partition indexes are never listed on their own, since they can't be dropped separately.
 - **Upgrades.**
   - Counters saved by an older version are read after the upgrade.
@@ -238,7 +240,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 ## Where the answers stop being reliable
 
 1. **No query id, nothing recorded.** With `compute_query_id = off` and no pg_stat_statements loaded, every statement has query id 0 and is skipped. If the views stay empty, check this first.
-2. **A crash loses the counters.** They are saved only at clean shutdown; `tracked_since` restarts.
+2. **A crash loses recent counts.** Counters are saved every `save_interval` (default 5 minutes) and at clean shutdown, and reloaded after a crash, so a crash loses at most the last few minutes. `tracked_since` stays the same, so an index used only in those minutes can look unused. With `save_interval = 0`, a crash loses everything and `tracked_since` restarts.
 3. **Evictions.** When `max` is too small, old pairs are dropped, and "unused" becomes "unknown". Watch `dealloc`.
 4. **A short tracking window.** A query that runs monthly makes its index look unused until it has run. Only time fixes this.
 5. **Replicas record separately.** No use on the primary says nothing about a replica. Check every instance.
@@ -251,7 +253,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
    - Queries evicted from pg_stat_statements or the plan source are invisible.
    - A renamed index loses its history, and its verdict is "unknown".
    - Plain RDS has no plan source. There is no dependents list there; `index_drop_impact` finds candidate queries by matching pg_stat_statements text.
-9. **A recreated index is a new index.** DROP/CREATE or `REINDEX CONCURRENTLY` gives it a new OID, and its history starts at zero.
+9. **A recreated index is a new index.** DROP INDEX + CREATE INDEX gives it a new OID, and its history starts at zero. `REINDEX CONCURRENTLY` also gives a new OID, but since 0.9.1 the native extension moves the history to it; counts other sessions hadn't flushed yet (up to `flush_interval`) are lost, and a `REINDEX SCHEMA/DATABASE CONCURRENTLY` that fails part-way doesn't move the history of the tables it already finished.
 10. **Column usage doesn't cover two cases.**
     - A plain ordered scan (ORDER BY on the index columns) and index-only coverage don't name columns. A column "not searched on" can still be needed for them.
     - Only key columns 1–32 are recorded.
@@ -268,10 +270,11 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 
 ## Overhead
 
-The cost is per statement, so it shows most on tiny read-only statements. The runs below were on AWS `c7gd.xlarge`, PG 17.11, pgbench scale 100, 3 × 300 s per mode:
+The cost is per statement, so it shows most on tiny read-only statements. Measured on AWS `c7gd.xlarge`, PG 17.11, pgbench scale 100:
 
-- **TPS, best run on 0.6:** `select_only` −1.8% and `wide` −0.9%. Runs on other instances measured up to −3.4% / −4.6%, because instances alone differ by up to 6%.
-- **CPU profile:** the extension's own code is about 0.7% of all CPU samples.
+- **TPS (0.9, 10 × 120 s per mode, one instance):** `select_only` **−3.3%** (95% interval −4.4% to −2.2%) and `wide` **−2.9%** (−4.1% to −1.7%); `on` was slower in all 10 runs of both. Read/write `tpcb`: no measurable difference. Budget about 3% on a server doing mostly tiny primary-key lookups.
+- **Earlier 3-run results** (0.6: −1.8% / −0.9%) were within noise and too optimistic.
+- **CPU profile:** the extension's own functions are about 0.7% of all CPU samples, less than the TPS cost; where the rest goes is not yet known.
 - **0.8:** recording index columns adds no measurable cost over 0.7 on the same instance.
 
 Details and raw results: README "Overhead" and [BENCHMARK.md](BENCHMARK.md).

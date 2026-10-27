@@ -126,6 +126,8 @@ The cost is per statement, so it shows on tiny read-only statements. Batching (0
 
 **CPU profile** of pgbench `-S` with 0.6 defaults, all CPUs, 60 s ([profile](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v06-profile.txt), `bench/profile.sh`): the extension's own code is about **0.7% of all CPU samples**. The ExecutorEnd hook, including the plan walk and local counting, is about 0.5%; the ExecutorRun/ExecutorFinish hooks are about 0.2%. The rest of the measured `select_only` difference is run-to-run noise: spreads are 2–4%, and TPS differs by up to 6% between instances of the same type. A [`sample_rate=0.1` run](bench/results/2026-10-25-aws-c7gd.xlarge-pg17-v06-sample0.1.md) measured −3.3%, which is no better than recording every statement, and only noise explains that. So `sample_rate` doesn't buy measurable speed on this workload; it exists for very large statement rates. `bench/aws-ec2.sh` and `bench/profile.sh` rerun all of this.
 
+**0.8 (column tracking)** vs 0.7 on one instance ([0.7](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v07-base.md), [0.8](bench/results/2026-10-26-aws-c7gd.xlarge-pg17-v08.md)): `select_only` −3.40% on both, `wide` −4.55% on 0.7 and −2.10% on 0.8, all within the spreads. Recording index columns adds no measurable cost.
+
 ## Tests
 
 ```bash

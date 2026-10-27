@@ -211,7 +211,8 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 | `pg_stat_index_queries.max` | 10000 | Tracked (index, query) pairs. Restart to change |
 | `pg_stat_index_queries.track` | `top` | `all` also records statements inside functions; `none` stops recording |
 | `pg_stat_index_queries.track_catalog` | off | Also record system catalog indexes |
-| `pg_stat_index_queries.save` | on | Keep counters across clean restarts |
+| `pg_stat_index_queries.save` | on | Keep counters across restarts |
+| `pg_stat_index_queries.save_interval` | 300s | Also save every this often, when the counters changed. A crash then loses at most this much. `0` = only at clean shutdown |
 | `pg_stat_index_queries.flush_interval` | 1s | `0` moves counts to shared memory after every statement (slower) |
 | `pg_stat_index_queries.sample_rate` | 1.0 | Below 1, counts are scaled estimates and unused indexes are reported as "unknown" |
 
@@ -238,7 +239,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 ## Where the answers stop being reliable
 
 1. **No query id, nothing recorded.** With `compute_query_id = off` and no pg_stat_statements loaded, every statement has query id 0 and is skipped. If the views stay empty, check this first.
-2. **A crash loses the counters.** They are saved only at clean shutdown; `tracked_since` restarts.
+2. **A crash loses recent counts.** Counters are saved every `save_interval` (default 5 minutes) and at clean shutdown, and reloaded after a crash, so a crash loses at most the last few minutes. `tracked_since` stays the same, so an index used only in those minutes can look unused. With `save_interval = 0`, a crash loses everything and `tracked_since` restarts.
 3. **Evictions.** When `max` is too small, old pairs are dropped, and "unused" becomes "unknown". Watch `dealloc`.
 4. **A short tracking window.** A query that runs monthly makes its index look unused until it has run. Only time fixes this.
 5. **Replicas record separately.** No use on the primary says nothing about a replica. Check every instance.

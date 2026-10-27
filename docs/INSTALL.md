@@ -18,6 +18,7 @@ compute_query_id = on                                 # or auto
 #pg_stat_index_queries.max = 10000
 #pg_stat_index_queries.track = top
 #pg_stat_index_queries.save = on
+#pg_stat_index_queries.save_interval = 300s
 ```
 
 ```sql
@@ -37,6 +38,8 @@ Do the same on each replica: each server only sees the queries it runs.
 **Upgrading 0.7 → 0.8:** install the new build, **restart** (the library changed: entries now record index columns), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.8';`. Saved counters from 0.7 are kept across the restart, marked `columns_complete = false`; `pg_stat_index_queries_reset()` starts a complete column record. The update drops and recreates `pg_stat_index_queries`, `pg_index_dependents`, `pg_index_dependents_rollup`, `pg_index_no_dependents` and `pg_index_usage` (the function's result type changes), so your own views on them must be dropped first. New view `pg_index_column_usage`.
 
 **Upgrading 0.8 → 0.9:** no restart (SQL only): `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';`. Adds the view `pg_index_sole_path`; nothing is dropped.
+
+**Upgrading 0.9 → 0.9.1:** install the new build and **restart** (library only; no `ALTER EXTENSION`, the SQL objects are unchanged). Saved counters are kept. New setting `save_interval` (default 300 s): counters are now also saved every 5 minutes, so a crash loses at most that much. `save_interval = 0` keeps the old behaviour. One extra process, `pg_stat_index_queries saver`, shows up in `ps` (not in `pg_stat_activity`, as it has no database connection).
 
 **Upgrading 0.6 → 0.7:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.7';` (adds `pg_index_table_stats`, `pg_index_column_stats` and `pg_index_hints()`; `pg_index_usage` gains a last column `hints`). SQL only, no restart.
 

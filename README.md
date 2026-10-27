@@ -109,7 +109,8 @@ SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.ind
 | `pg_stat_index_queries.max` | 10000 | Tracked (index, query) pairs. Restart to change. Least recently seen evicted when full |
 | `pg_stat_index_queries.track` | `top` | `top`, `all` (include statements inside functions), `none` |
 | `pg_stat_index_queries.track_catalog` | off | Also track system catalog indexes |
-| `pg_stat_index_queries.save` | on | Keep counters across clean restarts (lost on crash) |
+| `pg_stat_index_queries.save` | on | Keep counters across restarts |
+| `pg_stat_index_queries.save_interval` | 300s | Also save every this often (when they changed), so a crash loses at most this much. `0` = only at clean shutdown (a crash then loses everything) |
 | `pg_stat_index_queries.flush_interval` | 1s | Each session counts in its own memory and moves the counts to shared memory this often (and when it disconnects). Other sessions see them up to this late; a session always sees its own. `0` = after every statement (0.5 behaviour, slower) |
 | `pg_stat_index_queries.sample_rate` | 1.0 | Fraction of statements recorded; counts are scaled up. Below 1, counts are estimates and `pg_index_usage` reports unused indexes as "unknown" (a rarely used index can be missed) |
 
@@ -132,7 +133,7 @@ The cost is per statement, so it shows on tiny read-only statements. Batching (0
 ## Tests
 
 ```bash
-make installcheck                 # native: 9 regression suites + 4 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets)
+make installcheck                 # native: 9 regression suites + 5 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets, periodic saves)
 make -C sql_edition installcheck  # SQL edition: 7 suites: parsing, live pg_stat_plans, drop-impact, statistics, upgrades (needs pg_stat_plans + HypoPG)
 make test-all                     # both
 ```
@@ -153,7 +154,7 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 
 - Native extension: self-hosted only (RDS/Aurora don't allow custom C extensions).
 - Bitmap Index Scans always count as executed (Postgres builds their scan state at startup).
-- Counters are lost on crash (saved only at clean shutdown).
+- A crash loses the counts since the last periodic save (`save_interval`, default 5 minutes).
 - SQL edition only sees queries whose plans were captured, and loses ones evicted from pg_stat_statements.
 - `pg_index_query_stats` / `index_query_stats`: timing and buffers are per statement, not per index; a query using three indexes shows the same numbers on all three rows. `pct_calls_using_index` compares counters that are reset separately, so it can exceed 100 after a reset of one but not the other.
 - Drop-impact uses generic-plan cost estimates, not measured latency. When the generic plan can't use the index although real plans did (typically a partial index whose predicate has a constant), the row says `unknown:` with `plan_changed` NULL: check that query with EXPLAIN and real values.

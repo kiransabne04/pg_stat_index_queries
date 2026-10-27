@@ -6,6 +6,7 @@
 | 2026-10-15 | Skip catalog indexes by default | Catalog lookups would drown out user indexes |
 | 2026-10-15 | `EXECUTE`/`PREPARE` don't count as nesting | Same as pg_stat_statements; prepared statements are the user's top-level statements |
 | 2026-10-21 | Persist at clean shutdown only; delete file after load | Same model as pg_stat_statements; a crash must never reload stale counters |
+| 2026-10-27 | **Reopens 2026-10-21:** native 0.9.1 also saves every `save_interval` (default 300 s) from a background worker, keeps the file after loading, and reloads it after a crash (T09) | A long tracking window is what makes "no recorded use" believable, and one crash or OOM kill wiped it. A snapshot at most 5 minutes old is not stale in the sense that mattered (counts from before a reset): a reset removes the file and a save racing it is discarded. `save_interval = 0` keeps the old model. Library-only change, so 0.9.1 with no SQL version bump |
 | 2026-10-21 | Partition roll-up reports max per partition as calls, sum as partition scans | One statement can scan many partitions; summing would overcount statements |
 | 2026-10-21 | SQL edition is a separate extension (`pg_index_deps`) in the same repo | Must install on RDS/Aurora without C; shares docs and tests with the native extension |
 | 2026-10-21 | Drop-impact uses HypoPG hide + EXPLAIN (GENERIC_PLAN) | Works on managed Postgres; never executes queries or drops anything |

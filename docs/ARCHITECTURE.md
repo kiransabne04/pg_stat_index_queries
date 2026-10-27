@@ -8,6 +8,7 @@ ExecutorEnd                                     -> walk PlanState tree, add inde
 before_shmem_exit (backend)                     -> flush pending counts when the session ends
 shmem_request / shmem_startup                   -> shared hash + LWLock tranche; load saved file
 on_shmem_exit (postmaster)                      -> save file at clean shutdown
+background worker "saver" (0.9.1)               -> save file every save_interval when counters changed
 ```
 
 ### Capture (ExecutorEnd)
@@ -28,7 +29,7 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 - Flush to the shared hash: when `flush_interval` (default 1 s) has passed since the last flush, without waiting if the lock is busy (`LWLockConditionalAcquire`; the counts stay pending and are retried at the next statement); immediately when the pending table reaches 512 entries or `flush_interval = 0`; when the backend exits (`before_shmem_exit`); and before the backend reads the counters itself (`pg_stat_index_queries()`, `pg_stat_index_queries_info()`), so a session always sees its own counts.
 - Flush updates existing entries under the shared LWLock with the per-entry spinlock, then inserts new entries under the exclusive LWLock.
 - Why: in 0.5 every statement took the one shared LWLock and the entry spinlock, so on a busy server all cores kept writing the same cache lines (−3.4% on pgbench `-S`, 4 vCPU). Same model as PostgreSQL's own cumulative statistics (pending stats flushed about once a second).
-- Cost: other sessions see a backend's counts up to `flush_interval` late; a backend crash loses its pending counts (a crash already loses all counters); `pg_stat_index_queries_reset()` drops the caller's pending counts, but other backends' pending counts arrive after the reset.
+- Cost: other sessions see a backend's counts up to `flush_interval` late; a backend crash loses its pending counts (a server crash also loses the counts since the last periodic save); `pg_stat_index_queries_reset()` drops the caller's pending counts, but other backends' pending counts arrive after the reset.
 
 ### Shared memory
 - Key: `(dbid, indexrelid, queryid, toplevel)`, zero-padded with `memset` (HASH_BLOBS).
@@ -39,7 +40,9 @@ on_shmem_exit (postmaster)                      -> save file at clean shutdown
 ### Persistence (0.2)
 - File `pg_stat/pg_stat_index_queries.stat`: header (magic + format version), PG major, count, dealloc, stats_reset, `sampled` (format 2, 0.6+), then fixed-size records (format 3, 0.8+: with `cond_cols` and `order_cols`). Format 1 (0.2–0.5) and 2 (0.6–0.7) files are still read, so upgrading doesn't lose the counters; their entries get `cols_complete = false`, and `pg_index_column_usage` then says "unknown" instead of reporting a column as unused.
 - Written by the postmaster at clean shutdown (`on_shmem_exit`, exit code 0 only) to `.tmp`, then `durable_rename`.
-- Loaded when shared memory is created; deleted after loading so a crash never reloads stale data.
+- **Periodic saves (0.9.1):** a background worker (`pg_stat_index_queries saver`, shared memory only, no database connection, restarted 10 s after a crash) writes the same file every `save_interval` (default 300 s) when a flush or reset changed the counters since its last save (`dirty` flag, set at most once per save by flushes). It copies the entries under the shared LWLock (per-entry spinlock), writes `.tmp` without the lock, and renames under the shared lock only if no reset ran meanwhile (`reset_count`, bumped under the exclusive lock; the reset also removes the file). Backends' non-forced flushes never wait for it.
+- Loaded when shared memory is created, also after a crash. With periodic saves the file is kept after loading (it is the last snapshot, reloaded if the server crashes); with `save_interval = 0` or `save = off` it is deleted after loading, so a crash never reloads the previous shutdown's counters (the 0.2–0.9 behaviour). A crash loses at most `save_interval` + `flush_interval` of counts; `stats_reset` is unchanged.
+- The worker removes the file when a reload sets `save = off` or `save_interval = 0`.
 - Any mismatch or short read: LOG "ignoring invalid … file", discard everything, delete the file.
 
 ### SQL objects

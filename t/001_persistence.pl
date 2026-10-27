@@ -9,7 +9,9 @@ use Test::More;
 my $node = PostgreSQL::Test::Cluster->new('persist');
 $node->init;
 $node->append_conf('postgresql.conf',
-	"shared_preload_libraries = 'pg_stat_index_queries'\ncompute_query_id = on\nrestart_after_crash = on\n");
+	"shared_preload_libraries = 'pg_stat_index_queries'\ncompute_query_id = on\nrestart_after_crash = on\n"
+	  # Save only at shutdown (the 0.9 behaviour); periodic saves: 005.
+	  . "pg_stat_index_queries.save_interval = 0\n");
 $node->start;
 
 $node->safe_psql('postgres', q{

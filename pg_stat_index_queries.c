@@ -1929,8 +1929,9 @@ static void
 pg_stat_index_queries_internal(FunctionCallInfo fcinfo, pgsiqVersion api)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	HASH_SEQ_STATUS hash_seq;
-	pgsiqEntry *entry;
+	pgsiqEntry *entries;
+	int64		count;
+	int64		n;
 
 	check_loaded();
 
@@ -1939,47 +1940,37 @@ pg_stat_index_queries_internal(FunctionCallInfo fcinfo, pgsiqVersion api)
 
 	InitMaterializedSRF(fcinfo, 0);
 
+	/*
+	 * Copy under the shared lock and build the result after releasing it:
+	 * array and tuplestore work (which can spill to disk) must not hold up
+	 * backends waiting to insert or to flush on exit.
+	 */
 	LWLockAcquire(pgsiq->lock, LW_SHARED);
+	entries = pgsiq_snapshot(&count);
+	LWLockRelease(pgsiq->lock);
 
-	hash_seq_init(&hash_seq, pgsiq_hash);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	for (n = 0; n < count; n++)
 	{
+		const pgsiqEntry *entry = &entries[n];
 		Datum		values[PG_STAT_INDEX_QUERIES_COLS];
 		bool		nulls[PG_STAT_INDEX_QUERIES_COLS];
-		int64		calls_executed;
-		int64		calls_planned;
-		TimestampTz first_seen;
-		TimestampTz last_seen;
-		uint32		cond_cols;
-		uint32		order_cols;
-		bool		cols_complete;
 		int			i = 0;
 
 		memset(nulls, 0, sizeof(nulls));
-
-		SpinLockAcquire(&entry->mutex);
-		calls_executed = entry->calls_executed;
-		calls_planned = entry->calls_planned;
-		first_seen = entry->first_seen;
-		last_seen = entry->last_seen;
-		cond_cols = entry->cond_cols;
-		order_cols = entry->order_cols;
-		cols_complete = entry->cols_complete;
-		SpinLockRelease(&entry->mutex);
 
 		values[i++] = ObjectIdGetDatum(entry->key.dbid);
 		values[i++] = ObjectIdGetDatum(entry->key.indexrelid);
 		values[i++] = Int64GetDatumFast((int64) entry->key.queryid);
 		values[i++] = BoolGetDatum(entry->key.toplevel);
-		values[i++] = Int64GetDatumFast(calls_executed);
-		values[i++] = Int64GetDatumFast(calls_planned);
-		values[i++] = TimestampTzGetDatum(first_seen);
-		values[i++] = TimestampTzGetDatum(last_seen);
+		values[i++] = Int64GetDatumFast(entry->calls_executed);
+		values[i++] = Int64GetDatumFast(entry->calls_planned);
+		values[i++] = TimestampTzGetDatum(entry->first_seen);
+		values[i++] = TimestampTzGetDatum(entry->last_seen);
 		if (api >= PGSIQ_V0_8)
 		{
-			values[i++] = cols_to_array(cond_cols);
-			values[i++] = cols_to_array(order_cols);
-			values[i++] = BoolGetDatum(cols_complete);
+			values[i++] = cols_to_array(entry->cond_cols);
+			values[i++] = cols_to_array(entry->order_cols);
+			values[i++] = BoolGetDatum(entry->cols_complete);
 		}
 
 		Assert(i == (api == PGSIQ_V0_1 ? PG_STAT_INDEX_QUERIES_COLS_V0_1 :
@@ -1989,7 +1980,7 @@ pg_stat_index_queries_internal(FunctionCallInfo fcinfo, pgsiqVersion api)
 							 values, nulls);
 	}
 
-	LWLockRelease(pgsiq->lock);
+	pfree(entries);
 }
 
 Datum

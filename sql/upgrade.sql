@@ -44,7 +44,17 @@ SELECT to_regclass('pg_index_sole_path') IS NULL AS sole_path_absent_in_0_8;
 ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';
 SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
 SELECT to_regclass('pg_index_sole_path') IS NOT NULL AS sole_path;
--- The upgraded objects (0.1 -> ... -> 0.9) must be identical to a fresh install.
+-- 0.9 -> 0.10: pg_index_role notes and blocks indexes that serve a foreign key.
+CREATE TABLE up_parent (id int PRIMARY KEY);
+CREATE TABLE up_child (id int PRIMARY KEY, pid int REFERENCES up_parent);
+CREATE INDEX up_child_pid_idx ON up_child (pid);
+SELECT drop_blocker IS NULL AS no_blocker_in_0_9 FROM pg_index_role('up_child_pid_idx');
+ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.10';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_stat_index_queries';
+SELECT drop_blocker LIKE 'foreign-key checks use it: up_child_pid_fkey%' AS fk_blocker
+  FROM pg_index_role('up_child_pid_idx');
+DROP TABLE up_child, up_parent;
+-- The upgraded objects (0.1 -> ... -> 0.10) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT CASE d.classid WHEN 'pg_proc'::regclass THEN 'function ' || d.objid::regprocedure::text
                       ELSE 'view ' || d.objid::regclass::text END AS name,

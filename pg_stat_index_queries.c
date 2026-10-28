@@ -138,8 +138,10 @@ typedef struct pgsiqSharedState
 	TimestampTz stats_reset;
 	bool		sampled;		/* a statement was skipped by sample_rate */
 	bool		dirty;			/* counters changed since the last save */
-	uint64		reset_count;	/* bumped by reset; changed only under
-								 * exclusive lock */
+	pg_atomic_uint64 reset_count;	/* bumped by reset, under the exclusive
+									 * lock */
+	pg_atomic_uint64 change_count;	/* bumped by reset and eviction: entries
+									 * may have disappeared */
 } pgsiqSharedState;
 
 /* Counts of one (index, query) not yet moved to shared memory. */
@@ -152,6 +154,7 @@ typedef struct pgsiqPending
 	TimestampTz last_seen;
 	uint32		cond_cols;
 	uint32		order_cols;
+	uint64		epoch;			/* reset_count when the counts started */
 } pgsiqPending;
 
 /* One index seen in the current statement */
@@ -215,6 +218,17 @@ static HTAB *pending_hash = NULL;
 static TimestampTz last_flush = 0;
 static bool exit_hook_registered = false;
 
+/*
+ * Keys this backend knows are in the shared hash (it put them there, or
+ * saw them), valid while change_count is unchanged. A key not known to be
+ * there is published at once, so the existence of an (index, query) pair
+ * never waits in an idle session's pending table; only counts of known
+ * pairs are batched. Bounded; cleared when full.
+ */
+#define PGSIQ_MAX_KNOWN		2048
+static HTAB *known_hash = NULL;
+static uint64 known_change_count = 0;
+
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
@@ -254,6 +268,9 @@ static bool pgsiq_walker(PlanState *planstate, void *context);
 static void pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid,
 							 bool toplevel, int64 weight);
 static void pgsiq_flush(bool force);
+static void known_validate(void);
+static void known_add(const pgsiqHashKey *key);
+static bool known_in_shared(const pgsiqHashKey *key);
 static void pgsiq_backend_exit(int code, Datum arg);
 static void pending_discard(void);
 static void entry_dealloc(void);
@@ -442,7 +459,8 @@ pgsiq_shmem_startup(void)
 		pgsiq->stats_reset = GetCurrentTimestamp();
 		pgsiq->sampled = false;
 		pgsiq->dirty = false;
-		pgsiq->reset_count = 0;
+		pg_atomic_init_u64(&pgsiq->reset_count, 0);
+		pg_atomic_init_u64(&pgsiq->change_count, 0);
 	}
 
 	info.keysize = sizeof(pgsiqHashKey);
@@ -791,7 +809,7 @@ pgsiq_periodic_save(void)
 	stats_reset = pgsiq->stats_reset;
 	sampled = pgsiq->sampled;
 	SpinLockRelease(&pgsiq->mutex);
-	reset_count = pgsiq->reset_count;
+	reset_count = pg_atomic_read_u64(&pgsiq->reset_count);
 	entries = pgsiq_snapshot(&count);
 	LWLockRelease(pgsiq->lock);
 
@@ -799,7 +817,7 @@ pgsiq_periodic_save(void)
 						 stats_reset, sampled))
 	{
 		LWLockAcquire(pgsiq->lock, LW_SHARED);
-		if (pgsiq->reset_count == reset_count)
+		if (pg_atomic_read_u64(&pgsiq->reset_count) == reset_count)
 		{
 			if (rename(PGSIQ_SNAP_FILE ".tmp", PGSIQ_SNAP_FILE) == 0)
 				saved = renamed = true;
@@ -1337,7 +1355,11 @@ pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
 				 int64 weight)
 {
 	TimestampTz now = GetCurrentStatementStartTimestamp();
+	uint64		epoch = pg_atomic_read_u64(&pgsiq->reset_count);
+	bool		publish = false;
 	int			i;
+
+	known_validate();
 
 	if (pending_hash == NULL)
 	{
@@ -1370,23 +1392,27 @@ pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
 		key.toplevel = toplevel;
 
 		p = (pgsiqPending *) hash_search(pending_hash, &key, HASH_ENTER, &found);
-		if (!found)
+		/* New since the last flush, or counted before a reset: start over. */
+		if (!found || p->epoch != epoch)
 		{
 			p->calls_executed = 0;
 			p->calls_planned = 0;
 			p->first_seen = now;
 			p->cond_cols = 0;
 			p->order_cols = 0;
+			p->epoch = epoch;
+			if (!known_in_shared(&key))
+				publish = true;
 		}
-		p->calls_planned += weight;
+		p->calls_planned = add_sat(p->calls_planned, weight);
 		if (ctx->seen[i].executed)
-			p->calls_executed += weight;
+			p->calls_executed = add_sat(p->calls_executed, weight);
 		p->last_seen = now;
 		p->cond_cols |= ctx->seen[i].cond_cols;
 		p->order_cols |= ctx->seen[i].order_cols;
 	}
 
-	if (pgsiq_flush_interval == 0 ||
+	if (publish || pgsiq_flush_interval == 0 ||
 		hash_get_num_entries(pending_hash) >= PGSIQ_MAX_PENDING)
 		pgsiq_flush(true);
 	else if (TimestampDifferenceExceeds(last_flush, now, pgsiq_flush_interval))
@@ -1405,6 +1431,60 @@ mark_dirty(void)
 	}
 }
 
+/* Forget the known keys if shared entries may have been reset or evicted. */
+static void
+known_validate(void)
+{
+	uint64		cc = pg_atomic_read_u64(&pgsiq->change_count);
+
+	if (known_hash != NULL && cc != known_change_count)
+	{
+		hash_destroy(known_hash);
+		known_hash = NULL;
+	}
+	known_change_count = cc;
+}
+
+static void
+known_add(const pgsiqHashKey *key)
+{
+	if (known_hash == NULL || hash_get_num_entries(known_hash) >= PGSIQ_MAX_KNOWN)
+	{
+		HASHCTL		info;
+
+		if (known_hash != NULL)
+			hash_destroy(known_hash);
+		info.keysize = sizeof(pgsiqHashKey);
+		info.entrysize = sizeof(pgsiqHashKey);
+		info.hcxt = TopMemoryContext;
+		known_hash = hash_create("pg_stat_index_queries known", 256, &info,
+								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+	(void) hash_search(known_hash, key, HASH_ENTER, NULL);
+}
+
+/*
+ * True if key is known to be in the shared hash. A key not in the local
+ * set is looked up once (without waiting for the lock: if it is busy, the
+ * key counts as unknown and is published).
+ */
+static bool
+known_in_shared(const pgsiqHashKey *key)
+{
+	bool		found = false;
+
+	if (known_hash != NULL && hash_search(known_hash, key, HASH_FIND, NULL) != NULL)
+		return true;
+	if (LWLockConditionalAcquire(pgsiq->lock, LW_SHARED))
+	{
+		found = (hash_search(pgsiq_hash, key, HASH_FIND, NULL) != NULL);
+		LWLockRelease(pgsiq->lock);
+	}
+	if (found)
+		known_add(key);
+	return found;
+}
+
 /*
  * Move pending counts into the shared hash. force = false gives up if the
  * lock is busy (the counts stay pending and are retried later); force =
@@ -1417,6 +1497,7 @@ pgsiq_flush(bool force)
 	HASH_SEQ_STATUS hash_seq;
 	pgsiqPending *p;
 	bool		need_insert = false;
+	uint64		epoch;
 
 	if (pending_hash == NULL || pgsiq == NULL || pgsiq_hash == NULL ||
 		hash_get_num_entries(pending_hash) == 0)
@@ -1427,10 +1508,21 @@ pgsiq_flush(bool force)
 	else if (!LWLockConditionalAcquire(pgsiq->lock, LW_SHARED))
 		return;
 
+	/* A reset bumps this under the exclusive lock, so it can't move now. */
+	epoch = pg_atomic_read_u64(&pgsiq->reset_count);
+
 	hash_seq_init(&hash_seq, pending_hash);
 	while ((p = hash_seq_search(&hash_seq)) != NULL)
 	{
 		pgsiqEntry *entry;
+		pgsiqHashKey key;
+
+		/* Counted before a reset: belongs to the old epoch, drop it. */
+		if (p->epoch != epoch)
+		{
+			hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+			continue;
+		}
 
 		entry = (pgsiqEntry *) hash_search(pgsiq_hash, &p->key, HASH_FIND, NULL);
 		if (!entry)
@@ -1449,7 +1541,9 @@ pgsiq_flush(bool force)
 		entry->order_cols |= p->order_cols;
 		SpinLockRelease(&entry->mutex);
 		/* Removing the element just returned is allowed during a scan. */
+		key = p->key;
 		hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+		known_add(&key);
 	}
 	LWLockRelease(pgsiq->lock);
 	mark_dirty();
@@ -1461,11 +1555,19 @@ pgsiq_flush(bool force)
 		else if (!LWLockConditionalAcquire(pgsiq->lock, LW_EXCLUSIVE))
 			return;
 
+		epoch = pg_atomic_read_u64(&pgsiq->reset_count);
 		hash_seq_init(&hash_seq, pending_hash);
 		while ((p = hash_seq_search(&hash_seq)) != NULL)
 		{
 			pgsiqEntry *entry;
+			pgsiqHashKey key;
 			bool		found;
+
+			if (p->epoch != epoch)
+			{
+				hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+				continue;
+			}
 
 			if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
 				entry_dealloc();
@@ -1492,7 +1594,9 @@ pgsiq_flush(bool force)
 				entry->last_seen = p->last_seen;
 			entry->cond_cols |= p->cond_cols;
 			entry->order_cols |= p->order_cols;
+			key = p->key;
 			hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+			known_add(&key);
 		}
 		LWLockRelease(pgsiq->lock);
 		mark_dirty();
@@ -1623,6 +1727,7 @@ entry_dealloc(void)
 	SpinLockAcquire(&pgsiq->mutex);
 	pgsiq->dealloc++;
 	SpinLockRelease(&pgsiq->mutex);
+	pg_atomic_fetch_add_u64(&pgsiq->change_count, 1);
 }
 
 /* ---------- SQL-callable functions ---------- */
@@ -1777,7 +1882,8 @@ pg_stat_index_queries_reset(PG_FUNCTION_ARGS)
 	SpinLockRelease(&pgsiq->mutex);
 
 	/* A crash after a reset must not bring back the old counters. */
-	pgsiq->reset_count++;
+	pg_atomic_fetch_add_u64(&pgsiq->reset_count, 1);
+	pg_atomic_fetch_add_u64(&pgsiq->change_count, 1);
 	unlink(PGSIQ_SNAP_FILE);
 	unlink(PGSIQ_DUMP_FILE);
 

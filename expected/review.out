@@ -1,0 +1,134 @@
+-- Correctness review (native 0.10.1): cases found in the 29 Oct 2026 review.
+SET enable_seqscan = off;
+-- 1. A bitmap scan that never ran (one-time filter is false) is planned,
+--    not executed. PG 17+ can tell (the bitmap heap scan opens its scan
+--    lazily); PG 15/16 count it as executed (documented approximation).
+CREATE TABLE rv (id int PRIMARY KEY, a int, b int);
+CREATE INDEX rv_a_idx ON rv (a);
+CREATE INDEX rv_b_idx ON rv (b);
+INSERT INTO rv SELECT g, g % 100, g % 50 FROM generate_series(1, 5000) g;
+VACUUM ANALYZE rv;
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+SET enable_indexscan = off;
+SELECT count(*) FROM rv WHERE (a = 1 OR b = 2) AND (SELECT false);
+ count 
+-------
+     0
+(1 row)
+
+SELECT count(*) FROM rv WHERE a = 1 OR b = 2;
+ count 
+-------
+   150
+(1 row)
+
+RESET enable_indexscan;
+SELECT s.indexrelid::regclass AS index, sum(s.calls_planned) AS planned,
+       sum(s.calls_executed) = CASE WHEN current_setting('server_version_num')::int >= 170000
+                                    THEN 1 ELSE 2 END AS executed_as_expected
+  FROM pg_stat_index_queries s
+ WHERE s.indexrelid IN ('rv_a_idx'::regclass, 'rv_b_idx'::regclass)
+ GROUP BY 1 ORDER BY 1;
+  index   | planned | executed_as_expected 
+----------+---------+----------------------
+ rv_a_idx |       2 | t
+ rv_b_idx |       2 | t
+(2 rows)
+
+-- 2. More than 64 distinct indexes in one statement: all are recorded.
+DO $$ BEGIN
+  FOR i IN 1..70 LOOP
+    EXECUTE format('CREATE TABLE rv_m%s (id int PRIMARY KEY)', i);
+    EXECUTE format('INSERT INTO rv_m%s VALUES (1)', i);
+  END LOOP;
+END $$;
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+DO $$
+DECLARE q text;
+BEGIN
+  SELECT string_agg(format('SELECT id FROM rv_m%s WHERE id = 1', i), ' UNION ALL ')
+    INTO q FROM generate_series(1, 70) i;
+  EXECUTE 'CREATE FUNCTION rv_many() RETURNS bigint LANGUAGE sql AS $f$ SELECT count(*) FROM (' || q || ') s $f$';
+END $$;
+SET pg_stat_index_queries.track = 'all';
+SELECT rv_many();
+ rv_many 
+---------
+      70
+(1 row)
+
+RESET pg_stat_index_queries.track;
+SELECT count(DISTINCT s.indexrelid) AS indexes_recorded
+  FROM pg_stat_index_queries s JOIN pg_class c ON c.oid = s.indexrelid
+ WHERE c.relname LIKE 'rv\_m%\_pkey';
+ indexes_recorded 
+------------------
+               70
+(1 row)
+
+-- 3. ALTER TABLE ... ALTER COLUMN TYPE rebuilds the table's indexes with
+--    new OIDs; their history moves to the rebuilt index when the
+--    definition is unchanged. A constraint dropped and re-added on other
+--    columns under the same name is a new index: not carried over.
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+SELECT count(*) FROM rv WHERE a = 7;
+ count 
+-------
+    50
+(1 row)
+
+SELECT count(*) FROM rv WHERE id = 7;
+ count 
+-------
+     1
+(1 row)
+
+CREATE TEMP TABLE rv_before AS
+SELECT 'rv_a_idx'::regclass::oid AS a_oid, 'rv_pkey'::regclass::oid AS pk_oid;
+ALTER TABLE rv ALTER COLUMN a TYPE bigint, ALTER COLUMN id TYPE bigint;
+SELECT 'rv_a_idx'::regclass::oid <> a_oid AS a_rebuilt, 'rv_pkey'::regclass::oid <> pk_oid AS pk_rebuilt
+  FROM rv_before;
+ a_rebuilt | pk_rebuilt 
+-----------+------------
+ t         | t
+(1 row)
+
+SELECT c.relname, sum(s.calls_executed) AS calls
+  FROM pg_class c LEFT JOIN pg_stat_index_queries s ON s.indexrelid = c.oid
+ WHERE c.relname IN ('rv_a_idx', 'rv_pkey')
+ GROUP BY 1 ORDER BY 1;
+ relname  | calls 
+----------+-------
+ rv_a_idx |     1
+ rv_pkey  |     1
+(2 rows)
+
+ALTER TABLE rv DROP CONSTRAINT rv_pkey, ADD CONSTRAINT rv_pkey PRIMARY KEY (b, id);
+SELECT c.relname, coalesce(sum(s.calls_executed), 0) AS calls
+  FROM pg_class c LEFT JOIN pg_stat_index_queries s ON s.indexrelid = c.oid
+ WHERE c.relname = 'rv_pkey'
+ GROUP BY 1;
+ relname | calls 
+---------+-------
+ rv_pkey |     0
+(1 row)
+
+RESET enable_seqscan;
+DROP FUNCTION rv_many();
+DO $$ BEGIN FOR i IN 1..70 LOOP EXECUTE format('DROP TABLE rv_m%s', i); END LOOP; END $$;
+DROP TABLE rv;

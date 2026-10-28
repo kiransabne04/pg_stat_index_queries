@@ -58,6 +58,7 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/lmgr.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
@@ -68,6 +69,8 @@
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/ruleutils.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 #include <math.h>
@@ -189,6 +192,7 @@ typedef struct pgsiqReindexed
 	Oid			newoid;
 	Oid			nspid;
 	char	   *name;
+	char	   *def;			/* ALTER TABLE: definition before; else NULL */
 } pgsiqReindexed;
 
 /* ---------- GUCs ---------- */
@@ -294,7 +298,7 @@ static bool pgsiq_write_file(const char *path, const pgsiqEntry *entries,
 							 TimestampTz stats_reset, bool sampled);
 static void pgsiq_periodic_save(void);
 static inline void mark_dirty(void);
-static pgsiqReindexed *reindex_capture(int *n);
+static pgsiqReindexed *reindex_capture(int *n, Oid table);
 static void reindex_rekey(pgsiqReindexed *idx, int n);
 
 PG_FUNCTION_INFO_V1(pg_stat_index_queries);
@@ -1033,9 +1037,21 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		pgsiqReindexed *reindexed = NULL;
 		int			nreindexed = 0;
 
-		/* REINDEX CONCURRENTLY gives indexes new OIDs; carry history over. */
+		/*
+		 * REINDEX CONCURRENTLY and ALTER TABLE ... ALTER COLUMN TYPE give
+		 * indexes new OIDs; carry their history over.
+		 */
 		if (IsA(parsetree, ReindexStmt))
-			reindexed = reindex_capture(&nreindexed);
+			reindexed = reindex_capture(&nreindexed, InvalidOid);
+		else if (IsA(parsetree, AlterTableStmt) && pgsiq)
+		{
+			Oid			table = RangeVarGetRelid(((AlterTableStmt *) parsetree)->relation,
+												 NoLock, true);
+
+			if (OidIsValid(table) && get_rel_relkind(table) != RELKIND_INDEX &&
+				get_rel_relkind(table) != RELKIND_PARTITIONED_INDEX)
+				reindexed = reindex_capture(&nreindexed, table);
+		}
 
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -1065,14 +1081,35 @@ oid_cmp_reindexed(const void *lhs, const void *rhs)
 	return (l < r) ? -1 : (l > r) ? 1 : 0;
 }
 
+/* True if index is on table, or on a partition (at any depth) of it. */
+static bool
+index_on_table(Oid index, Oid table)
+{
+	Oid			rel = IndexGetRelation(index, true);
+	List	   *ancestors;
+	bool		result;
+
+	if (!OidIsValid(rel))
+		return false;
+	if (rel == table)
+		return true;
+	if (!get_rel_relispartition(rel))
+		return false;
+	ancestors = get_partition_ancestors(rel);
+	result = list_member_oid(ancestors, table);
+	list_free(ancestors);
+	return result;
+}
+
 /*
- * Before a REINDEX: the name and schema of every index tracked in this
- * database, sorted by OID. Allocated in PortalContext when there is one,
- * because REINDEX CONCURRENTLY commits transactions while it runs.
- * Returns NULL when nothing is tracked.
+ * Before a REINDEX or ALTER TABLE: the name and schema of every index
+ * tracked in this database (for ALTER TABLE: only the indexes of that table
+ * and its partitions, with their definitions), sorted by OID. Allocated in
+ * PortalContext when there is one, because REINDEX CONCURRENTLY commits
+ * transactions while it runs. Returns NULL when nothing is tracked.
  */
 static pgsiqReindexed *
-reindex_capture(int *n)
+reindex_capture(int *n, Oid table)
 {
 	MemoryContext old;
 	HASH_SEQ_STATUS hash_seq;
@@ -1111,9 +1148,34 @@ reindex_capture(int *n)
 
 		if (j > 0 && idx[j - 1].oldoid == idx[i].oldoid)
 			continue;
+		if (OidIsValid(table) && !index_on_table(idx[i].oldoid, table))
+			continue;
 		name = get_rel_name(idx[i].oldoid);
 		if (name == NULL)
 			continue;
+		idx[j].def = NULL;
+		if (OidIsValid(table))
+		{
+			/*
+			 * ALTER TABLE has not locked anything yet, and
+			 * pg_get_indexdef_string errors on an index dropped meanwhile.
+			 * Hold it against DROP INDEX while reading; never wait (no
+			 * deadlock with the ALTER's own locks), skip it instead.
+			 */
+			if (!ConditionalLockRelationOid(idx[i].oldoid, AccessShareLock))
+			{
+				pfree(name);
+				continue;
+			}
+			if (SearchSysCacheExists1(RELOID, ObjectIdGetDatum(idx[i].oldoid)))
+				idx[j].def = pg_get_indexdef_string(idx[i].oldoid);
+			UnlockRelationOid(idx[i].oldoid, AccessShareLock);
+			if (idx[j].def == NULL)
+			{
+				pfree(name);
+				continue;
+			}
+		}
 		idx[j].oldoid = idx[i].oldoid;
 		idx[j].newoid = InvalidOid;
 		idx[j].nspid = get_rel_namespace(idx[i].oldoid);
@@ -1133,9 +1195,12 @@ reindex_capture(int *n)
 }
 
 /*
- * After a REINDEX: an index whose old OID is gone and whose name now
- * belongs to a different OID was rebuilt concurrently. Move its entries to
- * the new OID, merging with any the new index already has. Other sessions'
+ * After a REINDEX or ALTER TABLE: an index whose old OID is gone and whose
+ * name now belongs to a different OID was rebuilt (REINDEX CONCURRENTLY;
+ * ALTER TABLE ... ALTER COLUMN TYPE rebuilds a table's indexes). For ALTER
+ * TABLE the definition must also be unchanged: a constraint dropped and
+ * re-added on other columns under the same name is a new index. Move its
+ * entries to the new OID, merging with any the new index already has. Other sessions'
  * not yet flushed counts still arrive under the old OID, which the views
  * ignore.
  */
@@ -1154,10 +1219,19 @@ reindex_rekey(pgsiqReindexed *idx, int n)
 		Oid			newoid = get_relname_relid(idx[i].name, idx[i].nspid);
 		char	   *oldname = get_rel_name(idx[i].oldoid);
 
-		if (oldname == NULL && OidIsValid(newoid) && newoid != idx[i].oldoid)
+		if (oldname == NULL && OidIsValid(newoid) && newoid != idx[i].oldoid &&
+			(get_rel_relkind(newoid) == RELKIND_INDEX ||
+			 get_rel_relkind(newoid) == RELKIND_PARTITIONED_INDEX))
 		{
-			idx[i].newoid = newoid;
-			nchanged++;
+			char	   *newdef = idx[i].def ? pg_get_indexdef_string(newoid) : NULL;
+
+			if (idx[i].def == NULL || strcmp(idx[i].def, newdef) == 0)
+			{
+				idx[i].newoid = newoid;
+				nchanged++;
+			}
+			if (newdef)
+				pfree(newdef);
 		}
 		if (oldname)
 			pfree(oldname);
@@ -1228,7 +1302,11 @@ reindex_rekey(pgsiqReindexed *idx, int n)
 	}
 
 	for (i = 0; i < n; i++)
+	{
 		pfree(idx[i].name);
+		if (idx[i].def)
+			pfree(idx[i].def);
+	}
 	pfree(idx);
 }
 

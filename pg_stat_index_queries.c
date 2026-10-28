@@ -77,7 +77,7 @@ PG_MODULE_MAGIC;
 
 #define PGSIQ_TRANCHE_NAME		"pg_stat_index_queries"
 #define PGSIQ_DEALLOC_PERCENT	5
-#define PGSIQ_MAX_INDEXES_PER_STMT	64
+#define PGSIQ_SEEN_INLINE	64		/* indexes per statement before growing */
 
 /* Persistence across clean restarts (same approach as pg_stat_statements). */
 #define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
@@ -166,11 +166,20 @@ typedef struct pgsiqSeenIndex
 	uint32		order_cols;
 } pgsiqSeenIndex;
 
+/*
+ * Indexes of one statement. The first PGSIQ_SEEN_INLINE are de-duplicated
+ * as they come; beyond that the array grows (palloc, in the executor's
+ * memory) without per-index search, and is sorted and merged once at the
+ * end, so a statement over many partitions costs O(n log n).
+ */
 typedef struct pgsiqWalkContext
 {
 	int			nseen;
-	bool		overflow;
-	pgsiqSeenIndex seen[PGSIQ_MAX_INDEXES_PER_STMT];
+	int			maxseen;
+	bool		needs_merge;
+	bool		bitmap_ran;		/* the enclosing bitmap heap scan ran */
+	pgsiqSeenIndex *seen;
+	pgsiqSeenIndex inline_seen[PGSIQ_SEEN_INLINE];
 } pgsiqWalkContext;
 
 /* A tracked index as it was before a REINDEX (name and schema). */
@@ -265,6 +274,7 @@ static void pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								 DestReceiver *dest, QueryCompletion *qc);
 static Size pgsiq_memsize(void);
 static bool pgsiq_walker(PlanState *planstate, void *context);
+static void seen_merge(pgsiqWalkContext *ctx);
 static void pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid,
 							 bool toplevel, int64 weight);
 static void pgsiq_flush(bool force);
@@ -1255,6 +1265,37 @@ index_cols(List *exprs)
 	return mask;
 }
 
+static int
+seen_cmp(const void *lhs, const void *rhs)
+{
+	Oid			l = ((const pgsiqSeenIndex *) lhs)->indexrelid;
+	Oid			r = ((const pgsiqSeenIndex *) rhs)->indexrelid;
+
+	return (l < r) ? -1 : (l > r) ? 1 : 0;
+}
+
+/* Sort and merge duplicates once the statement had many indexes. */
+static void
+seen_merge(pgsiqWalkContext *ctx)
+{
+	int			i;
+	int			j = 0;
+
+	qsort(ctx->seen, ctx->nseen, sizeof(pgsiqSeenIndex), seen_cmp);
+	for (i = 1; i < ctx->nseen; i++)
+	{
+		if (ctx->seen[i].indexrelid == ctx->seen[j].indexrelid)
+		{
+			ctx->seen[j].executed |= ctx->seen[i].executed;
+			ctx->seen[j].cond_cols |= ctx->seen[i].cond_cols;
+			ctx->seen[j].order_cols |= ctx->seen[i].order_cols;
+		}
+		else
+			ctx->seen[++j] = ctx->seen[i];
+	}
+	ctx->nseen = j + 1;
+}
+
 /* Column masks are only collected for scans that ran. */
 static void
 remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed,
@@ -1273,7 +1314,7 @@ remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed,
 		order_cols = index_cols(indexorderby);
 	}
 
-	for (i = 0; i < ctx->nseen; i++)
+	for (i = 0; i < Min(ctx->nseen, PGSIQ_SEEN_INLINE); i++)
 	{
 		if (ctx->seen[i].indexrelid == indexrelid)
 		{
@@ -1284,10 +1325,18 @@ remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed,
 		}
 	}
 
-	if (ctx->nseen >= PGSIQ_MAX_INDEXES_PER_STMT)
+	if (ctx->nseen >= PGSIQ_SEEN_INLINE)
+		ctx->needs_merge = true;
+	if (ctx->nseen >= ctx->maxseen)
 	{
-		ctx->overflow = true;
-		return;
+		pgsiqSeenIndex *bigger;
+
+		bigger = palloc(sizeof(pgsiqSeenIndex) * ctx->maxseen * 2);
+		memcpy(bigger, ctx->seen, sizeof(pgsiqSeenIndex) * ctx->nseen);
+		if (ctx->seen != ctx->inline_seen)
+			pfree(ctx->seen);
+		ctx->seen = bigger;
+		ctx->maxseen *= 2;
 	}
 
 	ctx->seen[ctx->nseen].indexrelid = indexrelid;
@@ -1326,16 +1375,36 @@ pgsiq_walker(PlanState *planstate, void *context)
 							   plan->indexqual, plan->indexorderby);
 				break;
 			}
-		case T_BitmapIndexScanState:
+		case T_BitmapHeapScanState:
 			{
 				/*
-				 * The scan descriptor is created at executor init, so we
-				 * cannot tell whether it actually ran. Counted as executed;
-				 * documented as approximate.
+				 * A bitmap index scan builds its scan state at executor init,
+				 * so it can't say whether it ran; its bitmap heap scan can. From
+				 * PG 17 the heap scan opens its table scan on the first fetch
+				 * and keeps it across rescans, so a scan descriptor means the
+				 * bitmap was built. A parallel-aware scan may have run only in
+				 * workers (the leader's state says nothing), and PG 15/16 open
+				 * the scan at init: both count as run, as before.
 				 */
+				bool		save = ctx->bitmap_ran;
+				bool		result;
+
+#if PG_VERSION_NUM >= 170000
+				ctx->bitmap_ran = planstate->plan->parallel_aware ||
+					((ScanState *) planstate)->ss_currentScanDesc != NULL;
+#else
+				ctx->bitmap_ran = true;
+#endif
+				result = planstate_tree_walker(planstate, pgsiq_walker, context);
+				ctx->bitmap_ran = save;
+				return result;
+			}
+		case T_BitmapIndexScanState:
+			{
 				BitmapIndexScan *plan = (BitmapIndexScan *) planstate->plan;
 
-				remember_index(ctx, plan->indexid, true, plan->indexqual, NIL);
+				remember_index(ctx, plan->indexid, ctx->bitmap_ran,
+							   plan->indexqual, NIL);
 				break;
 			}
 		default:
@@ -1664,10 +1733,15 @@ pgsiq_ExecutorEnd(QueryDesc *queryDesc)
 			pgsiqWalkContext ctx;
 
 			ctx.nseen = 0;
-			ctx.overflow = false;
+			ctx.maxseen = PGSIQ_SEEN_INLINE;
+			ctx.needs_merge = false;
+			ctx.bitmap_ran = true;
+			ctx.seen = ctx.inline_seen;
 
 			/* planstate_tree_walker() skips the root node; visit it ourselves. */
 			pgsiq_walker(queryDesc->planstate, &ctx);
+			if (ctx.needs_merge)
+				seen_merge(&ctx);
 
 			if (ctx.nseen > 0)
 				pgsiq_accumulate(&ctx, queryid, nesting_level == 0, weight);

@@ -34,7 +34,12 @@
 #include "access/parallel.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "catalog/index.h"
+#include "catalog/namespace.h"
+#include "catalog/partition.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
+#include "common/int.h"
 #include "common/pg_prng.h"
 #include "executor/executor.h"
 #include "funcapi.h"
@@ -90,6 +95,17 @@ PG_MODULE_MAGIC;
  * columns above 32 are then not recorded.
  */
 #define PGSIQ_MAX_MASK_COLS	32
+
+/* Counters saturate at the int64 maximum instead of wrapping. */
+static inline int64
+add_sat(int64 a, int64 b)
+{
+	int64		r;
+
+	if (pg_add_s64_overflow(a, b, &r))
+		return PG_INT64_MAX;
+	return r;
+}
 
 /* ---------- shared structures ---------- */
 
@@ -496,19 +512,25 @@ pgsiq_read_file(const char *path)
 
 	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V2 &&
 		 header != PGSIQ_FILE_HEADER_V1) ||
-		pgmajor != PGSIQ_PG_MAJOR || count < 0)
+		pgmajor != PGSIQ_PG_MAJOR || count < 0 || dealloc < 0)
 		goto bad_file;
-	if (header != PGSIQ_FILE_HEADER_V1 &&
-		fread(&sampled, sizeof(bool), 1, file) != 1)
-		goto bad_file;
+	if (header != PGSIQ_FILE_HEADER_V1)
+	{
+		unsigned char b;
+
+		if (fread(&b, 1, 1, file) != 1 || b > 1)
+			goto bad_file;
+		sampled = (b == 1);
+	}
 
 	for (i = 0; i < count; i++)
 	{
 		pgsiqEntry	temp;
 		pgsiqEntry *entry;
+		pgsiqHashKey raw;
 		bool		found;
 
-		if (fread(&temp.key, sizeof(pgsiqHashKey), 1, file) != 1 ||
+		if (fread(&raw, sizeof(pgsiqHashKey), 1, file) != 1 ||
 			fread(&temp.calls_executed, sizeof(int64), 1, file) != 1 ||
 			fread(&temp.calls_planned, sizeof(int64), 1, file) != 1 ||
 			fread(&temp.first_seen, sizeof(TimestampTz), 1, file) != 1 ||
@@ -522,14 +544,32 @@ pgsiq_read_file(const char *path)
 			 fread(&temp.order_cols, sizeof(uint32), 1, file) != 1))
 			goto bad_file;
 
-		/* Never exceed the configured size; drop the remainder. */
+		/*
+		 * Reject counters the writer can't produce (a damaged file): the
+		 * whole file goes, as for a short read. The key is rebuilt so
+		 * padding bytes are zero (keys are compared as raw bytes).
+		 */
+		if (raw.dbid == InvalidOid || raw.indexrelid == InvalidOid ||
+			*((unsigned char *) &raw.toplevel) > 1 ||
+			temp.calls_executed < 0 || temp.calls_planned < 0 ||
+			temp.calls_executed > temp.calls_planned ||
+			temp.first_seen > temp.last_seen)
+			goto bad_file;
+		memset(&temp.key, 0, sizeof(temp.key));
+		temp.key.dbid = raw.dbid;
+		temp.key.indexrelid = raw.indexrelid;
+		temp.key.queryid = raw.queryid;
+		temp.key.toplevel = (*((unsigned char *) &raw.toplevel) == 1);
+
+		/* Never exceed the configured size; the rest is still validated. */
 		if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
-			break;
+			continue;
 
 		entry = (pgsiqEntry *) hash_search(pgsiq_hash, &temp.key,
 										   HASH_ENTER, &found);
-		if (!found)
-			SpinLockInit(&entry->mutex);
+		if (found)
+			goto bad_file;		/* the writer never repeats a key */
+		SpinLockInit(&entry->mutex);
 		entry->calls_executed = temp.calls_executed;
 		entry->calls_planned = temp.calls_planned;
 		entry->first_seen = temp.first_seen;
@@ -538,6 +578,10 @@ pgsiq_read_file(const char *path)
 		entry->order_cols = temp.order_cols;
 		entry->cols_complete = temp.cols_complete;
 	}
+
+	/* Nothing may follow the last record. */
+	if (fgetc(file) != EOF)
+		goto bad_file;
 
 	pgsiq->dealloc = dealloc;
 	pgsiq->stats_reset = stats_reset;
@@ -1138,8 +1182,8 @@ reindex_rekey(pgsiqReindexed *idx, int n)
 				entry->cols_complete = m->cols_complete;
 				continue;
 			}
-			entry->calls_executed += m->calls_executed;
-			entry->calls_planned += m->calls_planned;
+			entry->calls_executed = add_sat(entry->calls_executed, m->calls_executed);
+			entry->calls_planned = add_sat(entry->calls_planned, m->calls_planned);
 			if (m->first_seen < entry->first_seen)
 				entry->first_seen = m->first_seen;
 			if (m->last_seen > entry->last_seen)
@@ -1395,8 +1439,10 @@ pgsiq_flush(bool force)
 			continue;
 		}
 		SpinLockAcquire(&entry->mutex);
-		entry->calls_executed += p->calls_executed;
-		entry->calls_planned += p->calls_planned;
+		entry->calls_executed = add_sat(entry->calls_executed, p->calls_executed);
+		entry->calls_planned = add_sat(entry->calls_planned, p->calls_planned);
+		if (p->first_seen < entry->first_seen)
+			entry->first_seen = p->first_seen;
 		if (p->last_seen > entry->last_seen)
 			entry->last_seen = p->last_seen;
 		entry->cond_cols |= p->cond_cols;
@@ -1438,8 +1484,10 @@ pgsiq_flush(bool force)
 				entry->cols_complete = true;
 			}
 			/* Exclusive lock held: no spinlock needed. */
-			entry->calls_executed += p->calls_executed;
-			entry->calls_planned += p->calls_planned;
+			entry->calls_executed = add_sat(entry->calls_executed, p->calls_executed);
+			entry->calls_planned = add_sat(entry->calls_planned, p->calls_planned);
+			if (p->first_seen < entry->first_seen)
+				entry->first_seen = p->first_seen;
 			if (p->last_seen > entry->last_seen)
 				entry->last_seen = p->last_seen;
 			entry->cond_cols |= p->cond_cols;

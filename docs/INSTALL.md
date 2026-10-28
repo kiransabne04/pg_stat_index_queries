@@ -39,7 +39,13 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.8 → 0.9:** no restart (SQL only): `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';`. Adds the view `pg_index_sole_path`; nothing is dropped.
 
-**Upgrading 0.9 → 0.9.1:** install the new build and **restart** (library only; no `ALTER EXTENSION`, the SQL objects are unchanged). Saved counters are kept. New setting `save_interval` (default 300 s): counters are now also saved every 5 minutes, so a crash loses at most that much. `save_interval = 0` keeps the old behaviour. One extra process, `pg_stat_index_queries saver`, shows up in `ps` (not in `pg_stat_activity`, as it has no database connection).
+**Upgrading 0.9 → 0.10:** install the new build, **restart** (the library changed), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.10';` (replaces `pg_index_role`; nothing is dropped). Saved counters are kept.
+- New setting `save_interval` (default 300 s): counters are also saved every 5 minutes to `pg_stat_tmp/`, so a crash loses at most that much. `save_interval = 0` keeps the old behaviour.
+- One extra process, `pg_stat_index_queries saver`, shows up in `ps` (not in `pg_stat_activity`: it has no database connection). It takes one `max_worker_processes` slot (default 8, shared with parallel query and logical replication); raise `max_worker_processes` by one if you rely on every slot.
+- Cursor queries (`DECLARE` / `FETCH` / `CLOSE`) are now recorded, and plain EXPLAIN isn't.
+- Indexes that serve a foreign key's checks now get a `drop_blocker`, so `pg_index_usage` no longer calls them drop candidates.
+
+**SQL edition 0.6 → 0.7:** `ALTER EXTENSION pg_index_deps UPDATE TO '0.7';` (or rerun `install_pg_tle.sql`, then `ALTER EXTENSION pg_index_deps UPDATE`). Same foreign-key change in `index_deps.index_role`.
 
 **Upgrading 0.6 → 0.7:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.7';` (adds `pg_index_table_stats`, `pg_index_column_stats` and `pg_index_hints()`; `pg_index_usage` gains a last column `hints`). SQL only, no restart.
 

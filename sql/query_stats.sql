@@ -48,3 +48,7 @@ SELECT indexname, index_calls_executed, calls IS NULL AS stats_null, query IS NU
 -- the view then says what is missing.
 DROP EXTENSION pg_stat_statements;
 SELECT count(*) FROM pg_index_query_stats;
+-- 0.10: the index definition, or NULL for an index that no longer exists
+-- (also when it is dropped while the definition is read).
+SELECT pg_index_def_or_null('qs_a_idx'::regclass) = pg_get_indexdef('qs_a_idx'::regclass) AS same_def,
+       pg_index_def_or_null(0) IS NULL AS null_for_missing;

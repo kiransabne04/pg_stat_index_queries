@@ -24,3 +24,10 @@ SELECT indexname, scan_types, source, other_indexes, is_unique, is_partial,
 DROP EXTENSION pg_stat_statements;
 SELECT count(*) FROM index_deps.index_query_stats;
 CREATE EXTENSION pg_stat_statements;
+-- 0.7: the index definition, or NULL for an index that no longer exists
+-- (also when it is dropped while the definition is read).
+CREATE TABLE qsd (a int);
+CREATE INDEX qsd_a_idx ON qsd (a);
+SELECT index_deps.index_def_or_null('qsd_a_idx'::regclass) = pg_get_indexdef('qsd_a_idx'::regclass) AS same_def,
+       index_deps.index_def_or_null(0) IS NULL AS null_for_missing;
+DROP TABLE qsd;

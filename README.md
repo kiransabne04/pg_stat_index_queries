@@ -8,7 +8,7 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.9 (SQL edition 0.6), experimental.** New here? Read the [user guide](docs/GUIDE.md): use cases, edge cases and limits. Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Don't rely on it in production until you've benchmarked it on your hardware.
+> **Status: 0.9 (SQL edition 0.6), experimental.** New here? Read the [user guide](docs/GUIDE.md): use cases, edge cases and limits. Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). Unreleased 0.10 / SQL edition 0.7 adds the fixes from a production review, tested on assertion + sanitizer builds under stress ([TESTING](docs/TESTING.md#assertion--sanitizer-build-and-stress-28-oct-2026)). Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 
@@ -143,8 +143,8 @@ The cost is per statement, so it shows on tiny read-only statements. Batching (0
 ## Tests
 
 ```bash
-make installcheck                 # native: 10 regression suites + 5 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets, periodic saves)
-make -C sql_edition installcheck  # SQL edition: 7 suites: parsing, live pg_stat_plans, drop-impact, statistics, upgrades (needs pg_stat_plans + HypoPG)
+make installcheck                 # native: 12 regression suites + 5 TAP tests (persistence incl. a real crash, eviction, flush across sessions, column sets, periodic saves)
+make -C sql_edition installcheck  # SQL edition: 8 suites: parsing, live pg_stat_plans, drop-impact, statistics, foreign-key support, upgrades (needs pg_stat_plans + HypoPG)
 make test-all                     # both
 ```
 

@@ -1,6 +1,6 @@
 # T09 — Save counters periodically, so a crash loses minutes, not everything
 
-**Status: done 27 Oct 2026** (native 0.9.1: library only, no SQL change).
+**Status: done 27 Oct 2026** (native 0.10: library only, no SQL change).
 
 ## Why
 Counters are written only at clean shutdown (guide, "Where the answers stop being reliable" #2). A crash, an OOM kill or a failover loses the whole tracking window. A long window is what makes "no recorded use" believable, so one crash months in resets the answer to "can I drop this?".

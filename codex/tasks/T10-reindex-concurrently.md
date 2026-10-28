@@ -1,6 +1,6 @@
 # T10 — Keep an index's history across REINDEX CONCURRENTLY
 
-**Status: done 27 Oct 2026** (native 0.9.1, with T09; library only).
+**Status: done 27 Oct 2026** (native 0.10, with T09; library only).
 
 ## Why
 `REINDEX CONCURRENTLY` builds a new index with a new OID, swaps it in under the old name and drops the old one. The native extension keys counters by OID, so routine maintenance (bloat cleanup) reset the index's history to zero, and "no recorded use" came back as if the index were new (guide limit #9).

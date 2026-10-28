@@ -212,7 +212,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 | `pg_stat_index_queries.track` | `top` | `all` also records statements inside functions; `none` stops recording |
 | `pg_stat_index_queries.track_catalog` | off | Also record system catalog indexes |
 | `pg_stat_index_queries.save` | on | Keep counters across restarts |
-| `pg_stat_index_queries.save_interval` | 300s | Also save every this often, when the counters changed. A crash then loses at most this much. `0` = only at clean shutdown |
+| `pg_stat_index_queries.save_interval` | 300s | Also save every this often, when the counters changed. A crash then loses at most this much. `0` = only at clean shutdown. The saver process takes one `max_worker_processes` slot |
 | `pg_stat_index_queries.flush_interval` | 1s | `0` moves counts to shared memory after every statement (slower) |
 | `pg_stat_index_queries.sample_rate` | 1.0 | Below 1, counts are scaled estimates and unused indexes are reported as "unknown" |
 
@@ -222,7 +222,10 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 - **Nested statements** (inside functions, DO, CALL, EXPLAIN ANALYZE, CREATE TABLE AS) are recorded with `toplevel = false`, and only with `track = all`. EXECUTE and PREPARE count as top level, as in pg_stat_statements.
 - **Constraint indexes.** Primary keys, unique and exclusion constraints, foreign-key targets, replica identity and clustered indexes get a `drop_blocker` and are never drop candidates.
 - **Invalid indexes** are reported as invalid, not unused.
-- **REINDEX CONCURRENTLY** (native, 0.9.1): the rebuilt index keeps its history and column sets under its new OID. Plain REINDEX keeps the OID anyway.
+- **Foreign-key indexes** (0.10). An index on a child table's foreign-key columns serves the checks PostgreSQL runs on every delete or key update of the parent. Those checks are nested statements, not recorded with `track = top`, so such an index gets a `drop_blocker` ("foreign-key checks use it") and is never a drop candidate.
+- **Cursors** (native, 0.10). Queries run through `DECLARE` / `FETCH` / `CLOSE` (psycopg named cursors, Django `.iterator()`) are recorded, at top level, under the same query ID as the plain query.
+- **Plain EXPLAIN** (no ANALYZE) is not a use and isn't recorded; EXPLAIN ANALYZE is recorded as nested.
+- **REINDEX CONCURRENTLY** (native, 0.10): the rebuilt index keeps its history and column sets under its new OID. Plain REINDEX keeps the OID anyway.
 - **Partitions.** Partition indexes fold into the parent; attached partition indexes are never listed on their own, since they can't be dropped separately.
 - **Upgrades.**
   - Counters saved by an older version are read after the upgrade.
@@ -253,7 +256,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
    - Queries evicted from pg_stat_statements or the plan source are invisible.
    - A renamed index loses its history, and its verdict is "unknown".
    - Plain RDS has no plan source. There is no dependents list there; `index_drop_impact` finds candidate queries by matching pg_stat_statements text.
-9. **A recreated index is a new index.** DROP INDEX + CREATE INDEX gives it a new OID, and its history starts at zero. `REINDEX CONCURRENTLY` also gives a new OID, but since 0.9.1 the native extension moves the history to it; counts other sessions hadn't flushed yet (up to `flush_interval`) are lost, and a `REINDEX SCHEMA/DATABASE CONCURRENTLY` that fails part-way doesn't move the history of the tables it already finished.
+9. **A recreated index is a new index.** DROP INDEX + CREATE INDEX gives it a new OID, and its history starts at zero. `REINDEX CONCURRENTLY` also gives a new OID, but since 0.10 the native extension moves the history to it; counts other sessions hadn't flushed yet (up to `flush_interval`) are lost, and a `REINDEX SCHEMA/DATABASE CONCURRENTLY` that fails part-way doesn't move the history of the tables it already finished.
 10. **Column usage doesn't cover two cases.**
     - A plain ordered scan (ORDER BY on the index columns) and index-only coverage don't name columns. A column "not searched on" can still be needed for them.
     - Only key columns 1–32 are recorded.
@@ -267,6 +270,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
     - A session's insert/update counts reach PostgreSQL's shared statistics up to a second late.
     - So a load followed at once by ANALYZE in the same session can still show the loaded rows in `n_mod_since_analyze`, and `stats_stale = true`. `pg_stat_user_tables` shows the same.
     - Fix: run ANALYZE again, or wait a moment before you read the hints.
+18. **Statements inside functions need `track = all`.** With the default `top`, statements run inside PL/pgSQL functions, procedures, DO blocks and triggers aren't recorded, so an index used only from there shows "no recorded use". Foreign-key checks are covered by the `drop_blocker` above; anything else isn't. If application logic lives in the database, set `pg_stat_index_queries.track = all` for the whole tracking window before you decide to drop anything.
 
 ## Overhead
 

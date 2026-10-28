@@ -1,7 +1,7 @@
--- pg_index_deps 0.6, plain install (generated, do not edit)
+-- pg_index_deps 0.7, plain install (generated, do not edit)
 CREATE SCHEMA IF NOT EXISTS index_deps;
 SET search_path = index_deps, public;
-/* pg_index_deps--0.6.sql
+/* pg_index_deps--0.7.sql
  *
  * SQL edition of pg_stat_index_queries. No C code, so it installs on managed
  * Postgres (Amazon Aurora, RDS) as well as self-hosted servers.
@@ -116,8 +116,12 @@ AS $$ SELECT CASE WHEN left($1, 1) = '"' AND right($1, 1) = '"'
 -- would break. index_role: primary key | unique constraint | exclusion
 -- constraint | unique index | index. index_notes: foreign keys that
 -- reference it, replica identity, clustered, invalid, partial, expression,
--- partitions. drop_blocker: why DROP INDEX fails or changes behaviour
--- (NULL when nothing but query speed depends on it).
+-- partitions, foreign keys on its own table that it supports. drop_blocker:
+-- why DROP INDEX fails or changes behaviour (NULL when nothing but query
+-- speed depends on it). An index that serves a foreign key's checks gets
+-- a drop_blocker too: those checks run as nested statements, which are
+-- often not recorded, and without the index every delete or key update on
+-- the referenced table scans this one.
 CREATE FUNCTION index_deps.index_role(
     p_index regclass,
     OUT index_role text,
@@ -128,6 +132,7 @@ AS $$
     WITH ix AS (
         SELECT x.indexrelid, x.indrelid, x.indisunique, x.indisreplident, x.indisclustered,
                x.indisvalid, x.indpred, x.indexprs, i.relkind, i.relispartition,
+               x.indkey, x.indnkeyatts,
                (SELECT ip.inhparent::regclass::text FROM pg_inherits ip
                  WHERE ip.inhrelid = x.indexrelid) AS parent_index,
                to_jsonb(x) ->> 'indnullsnotdistinct' AS nulls_not_distinct
@@ -147,17 +152,45 @@ AS $$
           FROM pg_constraint f, ix
          WHERE f.contype = 'f' AND f.conindid = ix.indexrelid AND f.conparentid = 0
     ),
+    -- Foreign keys on this index's table whose checks can use it: its
+    -- leading key columns are the foreign key's columns (any order), or no
+    -- index on the table is, and it starts with one of them.
+    fkc AS (
+        SELECT f.conname, f.conrelid, f.confrelid, f.conkey,
+               (SELECT array_agg(a ORDER BY a) FROM unnest(f.conkey) a) AS cols
+          FROM pg_constraint f, ix
+         WHERE f.contype = 'f' AND f.conrelid = ix.indrelid
+    ),
+    sup AS (
+        SELECT array_agg(format('supports foreign key %s on %s (checks on deletes and key updates in %s)',
+                                fkc.conname, fkc.conrelid::regclass, fkc.confrelid::regclass)
+                         ORDER BY fkc.conname) AS sups,
+               string_agg(format('%s (to %s)', fkc.conname, fkc.confrelid::regclass), ', '
+                          ORDER BY fkc.conname) AS sup_names
+          FROM fkc, ix
+         WHERE ix.indpred IS NULL AND ix.indisvalid
+           AND ((SELECT array_agg(a ORDER BY a)
+                   FROM unnest(ix.indkey::int2[]) WITH ORDINALITY u(a, n)
+                  WHERE n <= least(cardinality(fkc.conkey), ix.indnkeyatts)) = fkc.cols
+                OR (ix.indkey[0] = ANY (fkc.conkey)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pg_index o
+                         WHERE o.indrelid = fkc.conrelid AND o.indpred IS NULL AND o.indisvalid
+                           AND (SELECT array_agg(a ORDER BY a)
+                                  FROM unnest(o.indkey::int2[]) WITH ORDINALITY u(a, n)
+                                 WHERE n <= least(cardinality(fkc.conkey), o.indnkeyatts)) = fkc.cols)))
+    ),
     r AS (
         SELECT ix.indexrelid, ix.indrelid, ix.indisunique, ix.indisreplident, ix.indisclustered,
                ix.indisvalid, ix.indpred, ix.indexprs, ix.relkind, ix.relispartition,
                ix.parent_index, ix.nulls_not_distinct,
-               k.conname, k.contype, k.condeferrable, fk.refs,
+               k.conname, k.contype, k.condeferrable, fk.refs, sup.sups, sup.sup_names,
                CASE k.contype WHEN 'p' THEN 'primary key'
                               WHEN 'u' THEN 'unique constraint'
                               WHEN 'x' THEN 'exclusion constraint'
                               ELSE CASE WHEN ix.indisunique THEN 'unique index' ELSE 'index' END
                END AS role
-          FROM ix LEFT JOIN k ON true LEFT JOIN fk ON true
+          FROM ix LEFT JOIN k ON true LEFT JOIN fk ON true LEFT JOIN sup ON true
     )
     SELECT r.role,
            array_remove(ARRAY[
@@ -170,7 +203,7 @@ AS $$
                CASE WHEN r.indexprs IS NOT NULL THEN 'expression index' END,
                CASE WHEN r.relkind = 'I' THEN 'partitioned index (one index per partition)' END,
                CASE WHEN r.relispartition THEN 'partition of index ' || r.parent_index END
-           ]::text[], NULL) || coalesce(r.refs, '{}'),
+           ]::text[], NULL) || coalesce(r.refs, '{}') || coalesce(r.sups, '{}'),
            nullif(concat_ws('; ',
                CASE WHEN r.contype IS NOT NULL
                     THEN format('enforces %s %s: DROP INDEX fails, dropping the constraint removes the guarantee',
@@ -179,6 +212,10 @@ AS $$
                     THEN 'enforces uniqueness: dropping it allows duplicates' END,
                CASE WHEN r.refs IS NOT NULL
                     THEN 'foreign keys depend on it: ' || array_to_string(r.refs, ', ') END,
+               CASE WHEN r.sup_names IS NOT NULL
+                    THEN 'foreign-key checks use it: ' || r.sup_names
+                         || '; without it each delete or key update on the referenced table scans this one'
+                         || ' (these checks are nested statements, recorded only when nested statements are tracked)' END,
                CASE WHEN r.indisreplident
                     THEN 'replica identity: logical replication and CDC use it' END,
                CASE WHEN r.relispartition
@@ -873,6 +910,21 @@ GRANT USAGE ON SCHEMA index_deps TO PUBLIC;
 GRANT SELECT ON index_deps.plan_index_usage, index_deps.index_dependents,
                 index_deps.index_no_dependents TO PUBLIC;
 
+-- The index definition, or NULL when the index is dropped while it is read.
+-- pg_get_indexdef finds the index, then its columns; a DROP INDEX or REINDEX
+-- CONCURRENTLY committing in between raises "cache lookup failed" (an
+-- internal error), which would fail the whole query.
+CREATE FUNCTION index_deps.index_def_or_null(p_index oid)
+RETURNS text
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    RETURN pg_get_indexdef(p_index);
+EXCEPTION WHEN internal_error THEN
+    RETURN NULL;
+END;
+$$;
+
 -- One row per (index, query) from captured plans, with what a developer
 -- needs to debug it: the index definition and size, scan types, which other
 -- indexes the query's plans used, and the query's statistics from
@@ -971,7 +1023,7 @@ BEGIN
              GROUP BY p.queryid
         )
         SELECT d.schemaname, d.tablename, d.indexname, d.indexrelid,
-               pg_get_indexdef(d.indexrelid),
+               index_deps.index_def_or_null(d.indexrelid),
                pg_relation_size(d.indexrelid),
                x.indisunique,
                x.indpred IS NOT NULL,

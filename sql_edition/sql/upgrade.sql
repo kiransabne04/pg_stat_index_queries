@@ -44,7 +44,17 @@ SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
 SELECT to_regclass('index_deps.index_table_stats') IS NOT NULL AS table_stats,
        to_regclass('index_deps.index_column_stats') IS NOT NULL AS column_stats,
        to_regprocedure('index_deps.index_hints(regclass)') IS NOT NULL AS hints;
--- The upgraded objects (0.1 -> ... -> 0.6) must be identical to a fresh install.
+-- 0.6 -> 0.7: index_role notes and blocks indexes that serve a foreign key.
+CREATE TABLE up_parent (id int PRIMARY KEY);
+CREATE TABLE up_child (id int PRIMARY KEY, pid int REFERENCES up_parent);
+CREATE INDEX up_child_pid_idx ON up_child (pid);
+SELECT drop_blocker IS NULL AS no_blocker_in_0_6 FROM index_deps.index_role('up_child_pid_idx');
+ALTER EXTENSION pg_index_deps UPDATE TO '0.7';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
+SELECT drop_blocker LIKE 'foreign-key checks use it: up_child_pid_fkey%' AS fk_blocker
+  FROM index_deps.index_role('up_child_pid_idx');
+DROP TABLE up_child, up_parent;
+-- The upgraded objects (0.1 -> ... -> 0.7) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT 'function ' || p.oid::regprocedure::text AS name, pg_get_functiondef(p.oid) AS def
   FROM pg_proc p WHERE p.pronamespace = 'index_deps'::regnamespace

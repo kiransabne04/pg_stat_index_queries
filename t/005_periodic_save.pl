@@ -1,9 +1,9 @@
-# Periodic saves (0.9.1): the saver worker writes the counters every
+# Periodic saves (0.10): the saver worker writes the counters every
 # save_interval to pg_stat_tmp, so a crash keeps the last snapshot. A clean
 # restart followed by a crash keeps the counters too. A reset before a
 # crash doesn't bring old counters back; save = off and save_interval = 0
 # remove the snapshot. A replica made with pg_basebackup doesn't start with
-# the primary's counters. With save_interval = 0 at start, no worker runs.
+# the primary's counters. save_interval raised by a reload takes effect.
 use strict;
 use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
@@ -123,17 +123,19 @@ $node->append_conf('postgresql.conf', "pg_stat_index_queries.save = off\n");
 $node->reload;
 ok(wait_for(sub { !-e $file }), 'save = off removes the snapshot');
 
-# save_interval = 0 at server start: no worker (it would take a
-# max_worker_processes slot for nothing).
+# save_interval = 0 at server start, raised later by a reload: the worker
+# is always there, so saving starts without a restart.
 $node->append_conf('postgresql.conf',
 	"pg_stat_index_queries.save = on\npg_stat_index_queries.save_interval = 0\n");
 $node->restart;
-my $ps = `ps ax -o args`;
-ok($ps !~ /pg_stat_index_queries saver/, 'no saver worker with save_interval = 0');
+$node->safe_psql('postgres', $query);
+sleep 2;
+ok(!-e $file, 'save_interval = 0 at start: no snapshot');
 $node->append_conf('postgresql.conf', "pg_stat_index_queries.save_interval = 1\n");
-$node->restart;
-ok(wait_for(sub { `ps ax -o args` =~ /pg_stat_index_queries saver/ }),
-	'saver worker runs with save_interval > 0');
+$node->reload;
+ok(wait_for(sub { -e $file }), 'raising save_interval by reload starts saving');
+crash();
+is($node->safe_psql('postgres', $count_sql), '1', 'counters survive a crash after the reload');
 
 $node->stop;
 done_testing();

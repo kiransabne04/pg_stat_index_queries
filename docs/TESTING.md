@@ -71,6 +71,27 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 | Drop-impact fallback with no plan source (RDS-like) | Verified: candidates from query text, index use before/after correct |
 | Docker image (test runner + playground) | Built and run on macOS arm64, PG 15–18 |
 
+## Assertion + sanitizer build and stress (28 Oct 2026)
+
+`test/stress/Dockerfile` builds PostgreSQL from source with `--enable-cassert`, AddressSanitizer and UndefinedBehaviorSanitizer, and the extension against it (`-Werror`). `test/stress/stress.sh` then runs, for `DUR` seconds per phase, reads through dynamic SQL in PL/pgSQL (many query IDs; `max = 200` forces eviction), foreign-key cascades, cursors, sampling / `flush_interval = 0` / EXPLAIN / parallel queries, and all views. A noise loop meanwhile resets, runs REINDEX (plain and CONCURRENTLY, index, table and partitioned), drops and recreates indexes, reloads `save_interval` (0, 1, 2), and cancels and terminates backends. Between phases it kills a process with SIGKILL (crash restart), SIGKILLs the saver three times, corrupts the snapshot, restarts fast under load, and checks that counters survive a final crash.
+
+```bash
+docker build -f test/stress/Dockerfile --build-arg PGV=17.11 -t siq-debug:17 .
+docker run --rm siq-debug:17 make installcheck PG_CONFIG=/usr/local/pgsql/bin/pg_config
+docker run --rm --shm-size=1g -e DUR=120 siq-debug:17 bash test/stress/stress.sh
+```
+
+| Build | Regression + TAP | Stress (`DUR=120` unless noted) |
+|---|---|---|
+| PG 15.15 assert + ASan/UBSan | 12 suites + 5 TAP pass, no sanitizer reports | `DUR=45`: ~400k transactions, 15 crash restarts, no findings |
+| PG 17.11 assert + ASan/UBSan | pass, no reports | ~1.7M transactions, only the 5 intended SIGKILLs, counters kept across the final crash (198 → 198), no TRAP / PANIC / sanitizer report |
+| PG 18.1 assert + ASan/UBSan | pass, no reports | ~1.3M transactions, same result (195 → 195) |
+| PG 17.11 PGDG release, one session | | 30k statements (cursors, REINDEX CONCURRENTLY, resets, EXPLAIN, nested dynamic SQL): backend memory flat (3,033,808 bytes from the first to the last checkpoint), no errors |
+
+Every ERROR in the stress logs is one the harness causes (cancel, terminate, crash recovery, shutdown), plus PostgreSQL's own parallel-worker messages on cancel. Before the fix below, also `cache lookup failed for attribute 1 of relation N` (5–8 per 120 s run) from `pg_index_query_stats` racing with DROP INDEX / REINDEX CONCURRENTLY.
+
+Found and fixed by this round (details in CHANGELOG 0.10): `save_interval` raised by a reload saved nothing when the server started with 0; the views failed with `cache lookup failed` when an index was dropped while they ran; the first harness version reported OOM kills of backends as crashes: ASan's default 256 MB quarantine per process exhausts an 8 GB Docker VM, so the image sets `quarantine_size_mb=8`.
+
 ## Index lab (Docker, 24 Oct 2026)
 
 Command: `sql_edition/validation/lab/run.sh`, run against the Docker playground image.

@@ -909,6 +909,21 @@ GRANT USAGE ON SCHEMA index_deps TO PUBLIC;
 GRANT SELECT ON index_deps.plan_index_usage, index_deps.index_dependents,
                 index_deps.index_no_dependents TO PUBLIC;
 
+-- The index definition, or NULL when the index is dropped while it is read.
+-- pg_get_indexdef finds the index, then its columns; a DROP INDEX or REINDEX
+-- CONCURRENTLY committing in between raises "cache lookup failed" (an
+-- internal error), which would fail the whole query.
+CREATE FUNCTION index_deps.index_def_or_null(p_index oid)
+RETURNS text
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    RETURN pg_get_indexdef(p_index);
+EXCEPTION WHEN internal_error THEN
+    RETURN NULL;
+END;
+$$;
+
 -- One row per (index, query) from captured plans, with what a developer
 -- needs to debug it: the index definition and size, scan types, which other
 -- indexes the query's plans used, and the query's statistics from
@@ -1007,7 +1022,7 @@ BEGIN
              GROUP BY p.queryid
         )
         SELECT d.schemaname, d.tablename, d.indexname, d.indexrelid,
-               pg_get_indexdef(d.indexrelid),
+               index_deps.index_def_or_null(d.indexrelid),
                pg_relation_size(d.indexrelid),
                x.indisunique,
                x.indpred IS NOT NULL,

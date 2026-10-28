@@ -167,6 +167,9 @@ $$;
 
 -- Indexes in the current database and the queries that used them.
 -- Join to pg_stat_statements on (dbid, queryid) for query text.
+-- Column names come from pg_attribute; pg_get_indexdef only deparses
+-- expression columns (it raises "cache lookup failed" when the index is
+-- dropped while it runs).
 CREATE VIEW pg_index_dependents AS
     SELECT n.nspname AS schemaname,
            t.relname AS tablename,
@@ -179,9 +182,13 @@ CREATE VIEW pg_index_dependents AS
            s.first_seen,
            s.last_seen,
            (SELECT r.index_role FROM pg_index_role(s.indexrelid) r) AS index_role,
-           ARRAY(SELECT pg_get_indexdef(s.indexrelid, c, true)
+           ARRAY(SELECT CASE WHEN x.indkey[c - 1] = 0 THEN pg_get_indexdef(s.indexrelid, c, true)
+                             ELSE (SELECT quote_ident(a.attname) COLLATE "default" FROM pg_attribute a
+                                    WHERE a.attrelid = x.indrelid AND a.attnum = x.indkey[c - 1]) END
                    FROM unnest(s.cond_columns) AS c ORDER BY c) AS cond_columns,
-           ARRAY(SELECT pg_get_indexdef(s.indexrelid, c, true)
+           ARRAY(SELECT CASE WHEN x.indkey[c - 1] = 0 THEN pg_get_indexdef(s.indexrelid, c, true)
+                             ELSE (SELECT quote_ident(a.attname) COLLATE "default" FROM pg_attribute a
+                                    WHERE a.attrelid = x.indrelid AND a.attnum = x.indkey[c - 1]) END
                    FROM unnest(s.order_columns) AS c ORDER BY c) AS order_columns,
            s.columns_complete
       FROM pg_stat_index_queries() s
@@ -264,6 +271,21 @@ CREATE VIEW pg_index_dependents_rollup AS
       JOIN pg_namespace n ON n.oid = i.relnamespace;
 
 GRANT SELECT ON pg_index_dependents_rollup TO PUBLIC;
+
+-- The index definition, or NULL when the index is dropped while it is read.
+-- pg_get_indexdef finds the index, then its columns; a DROP INDEX or REINDEX
+-- CONCURRENTLY committing in between raises "cache lookup failed" (an
+-- internal error), which would fail the whole query.
+CREATE FUNCTION pg_index_def_or_null(p_index oid)
+RETURNS text
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    RETURN pg_get_indexdef(p_index);
+EXCEPTION WHEN internal_error THEN
+    RETURN NULL;
+END;
+$$;
 
 -- One row per (index, query) recorded since the last reset, with what a
 -- developer needs to debug it: the index definition and size, how often the
@@ -366,7 +388,7 @@ BEGIN
              GROUP BY p.queryid, p.toplevel
         )
         SELECT d.schemaname, d.tablename, d.indexname, d.indexrelid,
-               pg_get_indexdef(d.indexrelid),
+               pg_index_def_or_null(d.indexrelid),
                pg_relation_size(d.indexrelid),
                x.indisunique,
                x.indpred IS NOT NULL,
@@ -703,7 +725,7 @@ s AS (
 ),
 idx AS (
     SELECT n.nspname AS schemaname, t.relname AS tablename, i.relname AS indexname,
-           x.indexrelid, x.indnkeyatts
+           x.indexrelid, x.indnkeyatts, x.indrelid, x.indkey
       FROM pg_index x
       JOIN pg_class i ON i.oid = x.indexrelid
       JOIN pg_class t ON t.oid = x.indrelid
@@ -715,7 +737,9 @@ idx AS (
 cols AS (
     SELECT idx.schemaname, idx.tablename, idx.indexname, idx.indexrelid,
            k.k AS key_position,
-           pg_get_indexdef(idx.indexrelid, k.k, true) AS column_expr,
+           CASE WHEN idx.indkey[k.k - 1] = 0 THEN pg_get_indexdef(idx.indexrelid, k.k, true)
+                ELSE (SELECT quote_ident(a.attname) COLLATE "default" FROM pg_attribute a
+                       WHERE a.attrelid = idx.indrelid AND a.attnum = idx.indkey[k.k - 1]) END AS column_expr,
            u.queries, u.queries_searched, u.calls_searched, u.queries_ordered,
            u.queries_columns_unknown
       FROM idx

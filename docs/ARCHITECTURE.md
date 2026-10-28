@@ -3,12 +3,12 @@
 ## Native extension (`pg_stat_index_queries.c`)
 
 ```
-ExecutorRun / ExecutorFinish / ProcessUtility   -> track nesting level; ProcessUtility also re-keys entries after REINDEX CONCURRENTLY (0.9.1)
+ExecutorRun / ExecutorFinish / ProcessUtility   -> track nesting level; ProcessUtility also re-keys entries after REINDEX CONCURRENTLY (0.10)
 ExecutorEnd                                     -> walk PlanState tree, add index OIDs to a backend-local pending table
 before_shmem_exit (backend)                     -> flush pending counts when the session ends
 shmem_request / shmem_startup                   -> shared hash + LWLock tranche; load saved file
 on_shmem_exit (postmaster)                      -> save file at clean shutdown
-background worker "saver" (0.9.1)               -> save file every save_interval when counters changed
+background worker "saver" (0.10)               -> save file every save_interval when counters changed
 ```
 
 ### Capture (ExecutorEnd)
@@ -21,8 +21,13 @@ background worker "saver" (0.9.1)               -> save file every save_interval
 6. Skip catalog indexes (`oid < FirstNormalObjectId`) unless `track_catalog`.
 7. **Sampling (0.6):** with `sample_rate` < 1 a statement is recorded with that probability (`pg_prng_double`), and its counts are multiplied by `rint(1 / sample_rate)`. A skipped statement sets a shared `sampled` flag (written only when it was not already set), shown by `pg_stat_index_queries_sampled()` and used by `pg_index_usage` to report "unknown" instead of "no recorded use".
 
-### REINDEX CONCURRENTLY (0.9.1)
+### REINDEX CONCURRENTLY (0.10)
 REINDEX CONCURRENTLY swaps in a new index (new OID) under the old name and drops the old one. For every `ReindexStmt` the ProcessUtility hook flushes the session's counts and records name + schema of each index tracked in the current database (allocated in `PortalContext`, which survives the command's internal commits). After the command succeeds, an index whose old OID is gone and whose name resolves to another OID gets its entries moved under the exclusive lock, merged with entries the new index already has. Plain REINDEX keeps the OID, so nothing moves. Not moved: other sessions' unflushed counts, and tables finished by a SCHEMA/DATABASE run that later failed.
+
+### Cursors and EXPLAIN (0.10)
+- The query inside `DECLARE CURSOR` gets no query ID from PostgreSQL (only the DECLARE statement is jumbled), so it was never recorded. ProcessUtility now jumbles that query (`JumbleQuery`, copying the tree first when it is read-only), giving it the ID the same query has on its own. The cursor's ExecutorEnd runs at CLOSE, COMMIT, or (WITH HOLD) at COMMIT when it is materialized.
+- `CLOSE` and `DISCARD` don't count as nesting (like EXECUTE), so a cursor closed with CLOSE is recorded as top level.
+- Plain EXPLAIN (no ANALYZE) runs ExecutorStart/End without executing; such executions (`EXEC_FLAG_EXPLAIN_ONLY`) are skipped. Before, with `track = all`, a bitmap index scan in a plain EXPLAIN counted as executed.
 
 ### Nesting
 `EXECUTE` and `PREPARE` don't increase nesting (same as pg_stat_statements), so SQL-level prepared statements count as top level. Statements inside DO blocks, functions, CALL, EXPLAIN ANALYZE count as nested.
@@ -43,9 +48,12 @@ REINDEX CONCURRENTLY swaps in a new index (new OID) under the old name and drops
 ### Persistence (0.2)
 - File `pg_stat/pg_stat_index_queries.stat`: header (magic + format version), PG major, count, dealloc, stats_reset, `sampled` (format 2, 0.6+), then fixed-size records (format 3, 0.8+: with `cond_cols` and `order_cols`). Format 1 (0.2–0.5) and 2 (0.6–0.7) files are still read, so upgrading doesn't lose the counters; their entries get `cols_complete = false`, and `pg_index_column_usage` then says "unknown" instead of reporting a column as unused.
 - Written by the postmaster at clean shutdown (`on_shmem_exit`, exit code 0 only) to `.tmp`, then `durable_rename`.
-- **Periodic saves (0.9.1):** a background worker (`pg_stat_index_queries saver`, shared memory only, no database connection, restarted 10 s after a crash) writes the same file every `save_interval` (default 300 s) when a flush or reset changed the counters since its last save (`dirty` flag, set at most once per save by flushes). It copies the entries under the shared LWLock (per-entry spinlock), writes `.tmp` without the lock, and renames under the shared lock only if no reset ran meanwhile (`reset_count`, bumped under the exclusive lock; the reset also removes the file). Backends' non-forced flushes never wait for it.
-- Loaded when shared memory is created, also after a crash. With periodic saves the file is kept after loading (it is the last snapshot, reloaded if the server crashes); with `save_interval = 0` or `save = off` it is deleted after loading, so a crash never reloads the previous shutdown's counters (the 0.2–0.9 behaviour). A crash loses at most `save_interval` + `flush_interval` of counts; `stats_reset` is unchanged.
-- The worker removes the file when a reload sets `save = off` or `save_interval = 0`.
+- The shutdown save writes straight from the hash (all other processes have exited): no memory allocation and no spinlocks in the postmaster.
+- **Periodic saves (0.10):** a background worker (`pg_stat_index_queries saver`, shared memory only, no database connection, restarted 10 s after a crash; always registered, so it takes one `max_worker_processes` slot and `save_interval` can be raised by a reload) writes a snapshot with the same layout to **`pg_stat_tmp/pg_stat_index_queries.snap`** every `save_interval` (default 300 s), when a flush or reset changed the counters since its last save (`dirty` flag, set at most once per save by flushes).
+  - It copies the entries under the shared LWLock (per-entry spinlock), writes and fsyncs `.tmp` without the lock, renames under the shared lock only if no reset ran meanwhile (`reset_count`, bumped under the exclusive lock; the reset also removes both files), and fsyncs the directory after releasing the lock. Backends never wait for the disk.
+  - `pg_stat_tmp` is left out of base backups, so a replica made with `pg_basebackup` doesn't start with its primary's counters (a file in `pg_stat/` would be copied).
+- Loading, when shared memory is created (also after a crash): the shutdown file, if there is one, wins and both files are removed. Otherwise, with periodic saves on, the snapshot is loaded and kept. After a load the state is marked dirty, so a fresh snapshot follows within `save_interval` (a crash soon after a clean restart keeps the counters). With `save_interval = 0` or `save = off` no snapshot is used, as in 0.2–0.9. A crash loses at most `save_interval` + `flush_interval` of counts; `stats_reset` is unchanged.
+- The worker removes the snapshot when a reload sets `save = off` or `save_interval = 0`.
 - Any mismatch or short read: LOG "ignoring invalid … file", discard everything, delete the file.
 
 ### SQL objects

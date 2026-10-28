@@ -76,7 +76,7 @@ PG_MODULE_MAGIC;
 
 /* Persistence across clean restarts (same approach as pg_stat_statements). */
 #define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
-/* Periodic snapshot (0.9.1); not in base backups. */
+/* Periodic snapshot (0.10); not in base backups. */
 #define PGSIQ_SNAP_FILE		PG_STAT_TMP_DIR "/pg_stat_index_queries.snap"
 #define PGSIQ_FILE_HEADER	0x51495303	/* "SIQ" + format version 3 */
 #define PGSIQ_FILE_HEADER_V2	0x51495302	/* still read: no column masks */
@@ -347,11 +347,10 @@ _PG_init(void)
 	MarkGUCPrefixReserved("pg_stat_index_queries");
 
 	/*
-	 * Writes the counters every save_interval; shared memory only. Takes one
-	 * max_worker_processes slot, so it is only started when periodic saves
-	 * are on at server start (turning them on later needs a restart).
+	 * Writes the counters every save_interval; shared memory only. Always
+	 * registered (one max_worker_processes slot), so save_interval can be
+	 * raised with a reload; it sleeps while save_interval = 0 or save = off.
 	 */
-	if (pgsiq_save_interval > 0)
 	{
 		BackgroundWorker worker;
 
@@ -983,7 +982,7 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	PG_END_TRY();
 }
 
-/* ---------- REINDEX CONCURRENTLY (0.9.1) ---------- */
+/* ---------- REINDEX CONCURRENTLY (0.10) ---------- */
 
 static int
 oid_cmp_reindexed(const void *lhs, const void *rhs)

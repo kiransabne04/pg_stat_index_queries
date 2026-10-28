@@ -1,4 +1,4 @@
--- 0.9.1: cursor queries (DECLARE / FETCH / CLOSE) are recorded, with the
+-- 0.10: cursor queries (DECLARE / FETCH / CLOSE) are recorded, with the
 -- query ID the same query gets on its own; plain EXPLAIN (no ANALYZE) is
 -- not a use, also with track = all.
 CREATE TABLE cur (id int PRIMARY KEY, a int);

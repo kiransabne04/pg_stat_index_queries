@@ -1,4 +1,4 @@
--- 0.9.1 (T10): REINDEX CONCURRENTLY gives an index a new OID; its history
+-- 0.10 (T10): REINDEX CONCURRENTLY gives an index a new OID; its history
 -- moves to the new OID. Plain REINDEX keeps the OID and the counts.
 CREATE TABLE rx (id int PRIMARY KEY, a int, b int);
 CREATE INDEX rx_a_idx ON rx (a);

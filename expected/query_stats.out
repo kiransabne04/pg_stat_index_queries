@@ -96,3 +96,12 @@ SELECT count(*) FROM pg_index_query_stats;
 ERROR:  pg_index_query_stats needs pg_stat_statements
 HINT:  Add pg_stat_statements to shared_preload_libraries, restart, then CREATE EXTENSION pg_stat_statements;
 CONTEXT:  PL/pgSQL function pg_index_query_stats() line 10 at RAISE
+-- 0.10: the index definition, or NULL for an index that no longer exists
+-- (also when it is dropped while the definition is read).
+SELECT pg_index_def_or_null('qs_a_idx'::regclass) = pg_get_indexdef('qs_a_idx'::regclass) AS same_def,
+       pg_index_def_or_null(0) IS NULL AS null_for_missing;
+ same_def | null_for_missing 
+----------+------------------
+ t        | t
+(1 row)
+

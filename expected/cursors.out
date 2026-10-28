@@ -1,0 +1,123 @@
+-- 0.9.1: cursor queries (DECLARE / FETCH / CLOSE) are recorded, with the
+-- query ID the same query gets on its own; plain EXPLAIN (no ANALYZE) is
+-- not a use, also with track = all.
+CREATE TABLE cur (id int PRIMARY KEY, a int);
+CREATE INDEX cur_a_idx ON cur (a);
+INSERT INTO cur SELECT g, g % 100 FROM generate_series(1, 5000) g;
+VACUUM ANALYZE cur;
+SET enable_seqscan = off;
+CREATE VIEW cur_counts AS
+SELECT c.relname, s.toplevel, sum(s.calls_executed) AS executed,
+       sum(s.calls_planned) AS planned, count(DISTINCT s.queryid) AS queries
+  FROM pg_stat_index_queries s JOIN pg_class c ON c.oid = s.indexrelid
+ WHERE c.relname IN ('cur_pkey', 'cur_a_idx')
+ GROUP BY c.relname, s.toplevel
+ ORDER BY c.relname, s.toplevel;
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+-- Closed with CLOSE (a utility statement: still top level).
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT id FROM cur WHERE id = 7;
+FETCH ALL FROM c1;
+ id 
+----
+  7
+(1 row)
+
+CLOSE c1;
+COMMIT;
+-- Closed by COMMIT.
+BEGIN;
+DECLARE c2 CURSOR FOR SELECT id FROM cur WHERE id = 8;
+FETCH 1 FROM c2;
+ id 
+----
+  8
+(1 row)
+
+COMMIT;
+-- WITH HOLD: run to completion at COMMIT, closed later.
+BEGIN;
+DECLARE c3 CURSOR WITH HOLD FOR SELECT count(*) FROM cur WHERE a = 3;
+COMMIT;
+FETCH ALL FROM c3;
+ count 
+-------
+    50
+(1 row)
+
+CLOSE c3;
+-- Closed by DISCARD ALL.
+BEGIN;
+DECLARE c4 CURSOR WITH HOLD FOR SELECT id FROM cur WHERE id = 9;
+COMMIT;
+DISCARD ALL;
+SET enable_seqscan = off;
+SELECT relname, toplevel, executed, planned, queries FROM cur_counts;
+  relname  | toplevel | executed | planned | queries 
+-----------+----------+----------+---------+---------
+ cur_a_idx | t        |        1 |       1 |       1
+ cur_pkey  | t        |        3 |       3 |       1
+(2 rows)
+
+-- Same query ID as the query on its own: one query, two more calls.
+SELECT id FROM cur WHERE id = 10;
+ id 
+----
+ 10
+(1 row)
+
+SELECT id FROM cur WHERE id = 11;
+ id 
+----
+ 11
+(1 row)
+
+SELECT relname, toplevel, executed, planned, queries FROM cur_counts WHERE relname = 'cur_pkey';
+ relname  | toplevel | executed | planned | queries 
+----------+----------+----------+---------+---------
+ cur_pkey | t        |        5 |       5 |       1
+(1 row)
+
+-- Plain EXPLAIN is not recorded, even with track = all and a bitmap scan.
+SELECT pg_stat_index_queries_reset();
+ pg_stat_index_queries_reset 
+-----------------------------
+ 
+(1 row)
+
+SET pg_stat_index_queries.track = 'all';
+SET enable_indexscan = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM cur WHERE a = 3;
+                 QUERY PLAN                 
+--------------------------------------------
+ Aggregate
+   ->  Bitmap Heap Scan on cur
+         Recheck Cond: (a = 3)
+         ->  Bitmap Index Scan on cur_a_idx
+               Index Cond: (a = 3)
+(5 rows)
+
+RESET enable_indexscan;
+SELECT relname, toplevel, executed, planned, queries FROM cur_counts;
+ relname | toplevel | executed | planned | queries 
+---------+----------+----------+---------+---------
+(0 rows)
+
+-- EXPLAIN ANALYZE runs the query: recorded as nested (plan output not
+-- shown: its format differs between versions).
+DO $$ BEGIN EXECUTE 'EXPLAIN ANALYZE SELECT id FROM cur WHERE id = 5'; END $$;
+SELECT relname, toplevel, executed, planned, queries FROM cur_counts;
+ relname  | toplevel | executed | planned | queries 
+----------+----------+----------+---------+---------
+ cur_pkey | f        |        1 |       1 |       1
+(1 row)
+
+RESET pg_stat_index_queries.track;
+RESET enable_seqscan;
+DROP VIEW cur_counts;
+DROP TABLE cur;

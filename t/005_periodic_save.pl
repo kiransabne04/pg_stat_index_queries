@@ -1,7 +1,9 @@
 # Periodic saves (0.9.1): the saver worker writes the counters every
-# save_interval, so a crash keeps the last snapshot. A reset before a crash
-# doesn't bring old counters back; save = off and save_interval = 0 remove
-# the snapshot.
+# save_interval to pg_stat_tmp, so a crash keeps the last snapshot. A clean
+# restart followed by a crash keeps the counters too. A reset before a
+# crash doesn't bring old counters back; save = off and save_interval = 0
+# remove the snapshot. A replica made with pg_basebackup doesn't start with
+# the primary's counters. With save_interval = 0 at start, no worker runs.
 use strict;
 use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
@@ -10,13 +12,13 @@ use Test::More;
 use Time::HiRes qw(usleep);
 
 my $node = PostgreSQL::Test::Cluster->new('periodic');
-$node->init;
+$node->init(allows_streaming => 1);
 $node->append_conf('postgresql.conf',
 	"shared_preload_libraries = 'pg_stat_index_queries'\ncompute_query_id = on\n"
 	  . "restart_after_crash = on\npg_stat_index_queries.save_interval = 1\n");
 $node->start;
 
-my $file = $node->data_dir . '/pg_stat/pg_stat_index_queries.stat';
+my $file = $node->data_dir . '/pg_stat_tmp/pg_stat_index_queries.snap';
 
 $node->safe_psql('postgres', q{
 	CREATE EXTENSION pg_stat_index_queries;
@@ -72,6 +74,26 @@ ok(-e $file, 'snapshot kept after loading');
 $node->safe_psql('postgres', $query);
 is($node->safe_psql('postgres', $count_sql), '4', 'counting continues after crash');
 
+# Clean restart, then a crash before anything changes: the loaded counters
+# were saved again as a snapshot.
+$node->restart;
+ok(wait_for(sub { -e $file }), 'snapshot written after loading the shutdown file');
+crash();
+is($node->safe_psql('postgres', $count_sql), '4', 'counters survive restart + crash');
+
+# A replica from pg_basebackup starts without the primary's counters.
+$node->safe_psql('postgres', 'SELECT pg_create_physical_replication_slot(\'rep\')');
+$node->backup('bk');
+my $standby = PostgreSQL::Test::Cluster->new('standby');
+$standby->init_from_backup($node, 'bk', has_streaming => 1);
+$standby->append_conf('postgresql.conf', "primary_slot_name = 'rep'\n");
+$standby->start;
+ok(!-e $standby->data_dir . '/pg_stat_tmp/pg_stat_index_queries.snap',
+	'base backup has no snapshot');
+is($standby->safe_psql('postgres', $count_sql), '0', 'replica starts with no counters');
+$standby->stop;
+$node->safe_psql('postgres', 'SELECT pg_drop_replication_slot(\'rep\')');
+
 # Nothing changed: the saver doesn't rewrite the file.
 sleep 2;
 my $idle = mtime();
@@ -100,6 +122,18 @@ ok(wait_for(sub { -e $file }), 'snapshot written again');
 $node->append_conf('postgresql.conf', "pg_stat_index_queries.save = off\n");
 $node->reload;
 ok(wait_for(sub { !-e $file }), 'save = off removes the snapshot');
+
+# save_interval = 0 at server start: no worker (it would take a
+# max_worker_processes slot for nothing).
+$node->append_conf('postgresql.conf',
+	"pg_stat_index_queries.save = on\npg_stat_index_queries.save_interval = 0\n");
+$node->restart;
+my $ps = `ps ax -o args`;
+ok($ps !~ /pg_stat_index_queries saver/, 'no saver worker with save_interval = 0');
+$node->append_conf('postgresql.conf', "pg_stat_index_queries.save_interval = 1\n");
+$node->restart;
+ok(wait_for(sub { `ps ax -o args` =~ /pg_stat_index_queries saver/ }),
+	'saver worker runs with save_interval > 0');
 
 $node->stop;
 done_testing();

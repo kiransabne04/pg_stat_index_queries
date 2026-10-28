@@ -76,6 +76,8 @@ PG_MODULE_MAGIC;
 
 /* Persistence across clean restarts (same approach as pg_stat_statements). */
 #define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
+/* Periodic snapshot (0.9.1); not in base backups. */
+#define PGSIQ_SNAP_FILE		PG_STAT_TMP_DIR "/pg_stat_index_queries.snap"
 #define PGSIQ_FILE_HEADER	0x51495303	/* "SIQ" + format version 3 */
 #define PGSIQ_FILE_HEADER_V2	0x51495302	/* still read: no column masks */
 #define PGSIQ_FILE_HEADER_V1	0x51495301	/* still read: no sampled flag */
@@ -240,11 +242,13 @@ static void pgsiq_backend_exit(int code, Datum arg);
 static void pending_discard(void);
 static void entry_dealloc(void);
 static void pgsiq_shmem_shutdown(int code, Datum arg);
+static bool pgsiq_read_file(const char *path);
 static void pgsiq_load_file(void);
 static pgsiqEntry *pgsiq_snapshot(int64 *count);
-static bool pgsiq_write_file(const pgsiqEntry *entries, int64 count,
-							 int64 dealloc, TimestampTz stats_reset,
-							 bool sampled);
+static bool write_entry(FILE *file, const pgsiqEntry *entry);
+static bool pgsiq_write_file(const char *path, const pgsiqEntry *entries,
+							 int64 count, int64 dealloc,
+							 TimestampTz stats_reset, bool sampled);
 static void pgsiq_periodic_save(void);
 static inline void mark_dirty(void);
 static pgsiqReindexed *reindex_capture(int *n);
@@ -342,7 +346,12 @@ _PG_init(void)
 
 	MarkGUCPrefixReserved("pg_stat_index_queries");
 
-	/* Writes the counters every save_interval; shared memory only. */
+	/*
+	 * Writes the counters every save_interval; shared memory only. Takes one
+	 * max_worker_processes slot, so it is only started when periodic saves
+	 * are on at server start (turning them on later needs a restart).
+	 */
+	if (pgsiq_save_interval > 0)
 	{
 		BackgroundWorker worker;
 
@@ -448,9 +457,17 @@ pgsiq_shmem_startup(void)
  * order_cols). Any mismatch or short read discards the whole file.
  * Version 1 (0.1-0.5) and 2 (0.6-0.7) files are still read; their entries
  * get cols_complete = false, so no column is reported as unused.
+ *
+ * Two files with that layout:
+ * - PGSIQ_DUMP_FILE (pg_stat/): written at clean shutdown, removed after
+ *   loading, as in pg_stat_statements.
+ * - PGSIQ_SNAP_FILE (pg_stat_tmp/): written every save_interval by the
+ *   saver worker, loaded only when there is no shutdown file (after a
+ *   crash). pg_stat_tmp is left out of base backups, so a new replica
+ *   doesn't start with its primary's counters.
  */
-static void
-pgsiq_load_file(void)
+static bool
+pgsiq_read_file(const char *path)
 {
 	FILE	   *file;
 	uint32		header;
@@ -461,14 +478,14 @@ pgsiq_load_file(void)
 	bool		sampled = false;
 	int64		i;
 
-	file = AllocateFile(PGSIQ_DUMP_FILE, PG_BINARY_R);
+	file = AllocateFile(path, PG_BINARY_R);
 	if (file == NULL)
 	{
 		if (errno != ENOENT)
 			ereport(LOG,
 					(errcode_for_file_access(),
-					 errmsg("could not read file \"%s\": %m", PGSIQ_DUMP_FILE)));
-		return;
+					 errmsg("could not read file \"%s\": %m", path)));
+		return false;
 	}
 
 	if (fread(&header, sizeof(uint32), 1, file) != 1 ||
@@ -528,22 +545,14 @@ pgsiq_load_file(void)
 	pgsiq->sampled = sampled;
 
 	FreeFile(file);
-
-	/*
-	 * With periodic saves the file is the last snapshot, reloaded after a
-	 * crash. Without them, remove it so a crash doesn't reload counters from
-	 * the previous clean shutdown.
-	 */
-	if (!pgsiq_save || pgsiq_save_interval == 0)
-		unlink(PGSIQ_DUMP_FILE);
-	return;
+	return true;
 
 bad_file:
 	ereport(LOG,
 			(errmsg("ignoring invalid pg_stat_index_queries file \"%s\"",
-					PGSIQ_DUMP_FILE)));
+					path)));
 	FreeFile(file);
-	unlink(PGSIQ_DUMP_FILE);
+	unlink(path);
 
 	/* Start clean: drop anything partially loaded. */
 	{
@@ -554,36 +563,54 @@ bad_file:
 		while ((entry = hash_seq_search(&hash_seq)) != NULL)
 			hash_search(pgsiq_hash, &entry->key, HASH_REMOVE, NULL);
 	}
+	return false;
+}
+
+/* Called by the postmaster when shared memory is created. */
+static void
+pgsiq_load_file(void)
+{
+	bool		periodic = pgsiq_save && pgsiq_save_interval > 0;
+	bool		loaded;
+
+	/* A clean shutdown's file is newer than any snapshot. */
+	loaded = pgsiq_read_file(PGSIQ_DUMP_FILE);
+	unlink(PGSIQ_DUMP_FILE);
+	if (loaded || !periodic)
+		unlink(PGSIQ_SNAP_FILE);
+	else
+		loaded = pgsiq_read_file(PGSIQ_SNAP_FILE);
+
+	/* Let the saver write a snapshot of what was loaded. */
+	if (loaded && periodic)
+		pgsiq->dirty = true;
 }
 
 static void
 pgsiq_shmem_shutdown(int code, Datum arg)
 {
-	pgsiqEntry *entries;
-	int64		count;
-
 	/* Don't save after a crash, or if shared memory was never set up. */
 	if (code != 0 || !pgsiq || !pgsiq_hash)
 		return;
 
+	unlink(PGSIQ_SNAP_FILE);
 	if (!pgsiq_save)
 	{
 		unlink(PGSIQ_DUMP_FILE);
 		return;
 	}
 
-	/* All other processes have exited: no lock needed. */
-	entries = pgsiq_snapshot(&count);
-	if (pgsiq_write_file(entries, count, pgsiq->dealloc, pgsiq->stats_reset,
-						 pgsiq->sampled))
+	/*
+	 * All other processes have exited: write straight from the hash, with
+	 * no lock and no memory allocation in the postmaster.
+	 */
+	if (pgsiq_write_file(PGSIQ_DUMP_FILE ".tmp", NULL,
+						 hash_get_num_entries(pgsiq_hash), pgsiq->dealloc,
+						 pgsiq->stats_reset, pgsiq->sampled))
 		(void) durable_rename(PGSIQ_DUMP_FILE ".tmp", PGSIQ_DUMP_FILE, LOG);
-	pfree(entries);
 }
 
-/*
- * Copy all entries into local memory. Caller holds the lock (at least
- * shared), or is the postmaster at shutdown.
- */
+/* Copy all entries into local memory. Caller holds the lock (shared). */
 static pgsiqEntry *
 pgsiq_snapshot(int64 *count)
 {
@@ -606,20 +633,34 @@ pgsiq_snapshot(int64 *count)
 	return entries;
 }
 
+static bool
+write_entry(FILE *file, const pgsiqEntry *entry)
+{
+	return fwrite(&entry->key, sizeof(pgsiqHashKey), 1, file) == 1 &&
+		fwrite(&entry->calls_executed, sizeof(int64), 1, file) == 1 &&
+		fwrite(&entry->calls_planned, sizeof(int64), 1, file) == 1 &&
+		fwrite(&entry->first_seen, sizeof(TimestampTz), 1, file) == 1 &&
+		fwrite(&entry->last_seen, sizeof(TimestampTz), 1, file) == 1 &&
+		fwrite(&entry->cond_cols, sizeof(uint32), 1, file) == 1 &&
+		fwrite(&entry->order_cols, sizeof(uint32), 1, file) == 1;
+}
+
 /*
- * Write entries to PGSIQ_DUMP_FILE ".tmp"; the caller renames it into place.
- * Returns false (after a LOG message) on failure.
+ * Write count entries to path and fsync it; the caller renames it into
+ * place. entries = NULL writes straight from the shared hash (only when no
+ * other process can touch it). Returns false (after a LOG message) on
+ * failure.
  */
 static bool
-pgsiq_write_file(const pgsiqEntry *entries, int64 count, int64 dealloc,
-				 TimestampTz stats_reset, bool sampled)
+pgsiq_write_file(const char *path, const pgsiqEntry *entries, int64 count,
+				 int64 dealloc, TimestampTz stats_reset, bool sampled)
 {
 	FILE	   *file;
 	uint32		header = PGSIQ_FILE_HEADER;
 	int32		pgmajor = PGSIQ_PG_MAJOR;
 	int64		i;
 
-	file = AllocateFile(PGSIQ_DUMP_FILE ".tmp", PG_BINARY_W);
+	file = AllocateFile(path, PG_BINARY_W);
 	if (file == NULL)
 		goto error;
 
@@ -631,19 +672,30 @@ pgsiq_write_file(const pgsiqEntry *entries, int64 count, int64 dealloc,
 		fwrite(&sampled, sizeof(bool), 1, file) != 1)
 		goto error;
 
-	for (i = 0; i < count; i++)
+	if (entries != NULL)
 	{
-		const pgsiqEntry *entry = &entries[i];
-
-		if (fwrite(&entry->key, sizeof(pgsiqHashKey), 1, file) != 1 ||
-			fwrite(&entry->calls_executed, sizeof(int64), 1, file) != 1 ||
-			fwrite(&entry->calls_planned, sizeof(int64), 1, file) != 1 ||
-			fwrite(&entry->first_seen, sizeof(TimestampTz), 1, file) != 1 ||
-			fwrite(&entry->last_seen, sizeof(TimestampTz), 1, file) != 1 ||
-			fwrite(&entry->cond_cols, sizeof(uint32), 1, file) != 1 ||
-			fwrite(&entry->order_cols, sizeof(uint32), 1, file) != 1)
-			goto error;
+		for (i = 0; i < count; i++)
+			if (!write_entry(file, &entries[i]))
+				goto error;
 	}
+	else
+	{
+		HASH_SEQ_STATUS hash_seq;
+		pgsiqEntry *entry;
+
+		hash_seq_init(&hash_seq, pgsiq_hash);
+		while ((entry = hash_seq_search(&hash_seq)) != NULL)
+		{
+			if (!write_entry(file, entry))
+			{
+				hash_seq_term(&hash_seq);
+				goto error;
+			}
+		}
+	}
+
+	if (fflush(file) != 0 || pg_fsync(fileno(file)) != 0)
+		goto error;
 
 	if (FreeFile(file))
 	{
@@ -655,18 +707,20 @@ pgsiq_write_file(const pgsiqEntry *entries, int64 count, int64 dealloc,
 error:
 	ereport(LOG,
 			(errcode_for_file_access(),
-			 errmsg("could not write file \"%s\": %m", PGSIQ_DUMP_FILE ".tmp")));
+			 errmsg("could not write file \"%s\": %m", path)));
 	if (file)
 		FreeFile(file);
-	unlink(PGSIQ_DUMP_FILE ".tmp");
+	unlink(path);
 	return false;
 }
 
 /*
  * Save the counters if they changed since the last save. Entries are copied
- * under the shared lock and written without it; the rename happens under
- * the shared lock again, and only if no reset ran in between (a reset takes
- * the exclusive lock and removes the file).
+ * under the shared lock; the file is written and fsynced without it. The
+ * rename happens under the shared lock again, and only if no reset ran in
+ * between (a reset takes the exclusive lock and removes the snapshot), so a
+ * crash never brings back counters from before a reset. Backends never wait
+ * for the disk.
  */
 static void
 pgsiq_periodic_save(void)
@@ -678,6 +732,7 @@ pgsiq_periodic_save(void)
 	bool		sampled;
 	uint64		reset_count;
 	bool		saved = false;
+	bool		renamed = false;
 
 	LWLockAcquire(pgsiq->lock, LW_SHARED);
 	SpinLockAcquire(&pgsiq->mutex);
@@ -697,27 +752,37 @@ pgsiq_periodic_save(void)
 	entries = pgsiq_snapshot(&count);
 	LWLockRelease(pgsiq->lock);
 
-	if (pgsiq_write_file(entries, count, dealloc, stats_reset, sampled))
+	if (pgsiq_write_file(PGSIQ_SNAP_FILE ".tmp", entries, count, dealloc,
+						 stats_reset, sampled))
 	{
 		LWLockAcquire(pgsiq->lock, LW_SHARED);
 		if (pgsiq->reset_count == reset_count)
-			saved = (durable_rename(PGSIQ_DUMP_FILE ".tmp", PGSIQ_DUMP_FILE,
-									LOG) == 0);
+		{
+			if (rename(PGSIQ_SNAP_FILE ".tmp", PGSIQ_SNAP_FILE) == 0)
+				saved = renamed = true;
+			else
+				ereport(LOG,
+						(errcode_for_file_access(),
+						 errmsg("could not rename file \"%s\": %m",
+								PGSIQ_SNAP_FILE ".tmp")));
+		}
 		else
 		{
-			unlink(PGSIQ_DUMP_FILE ".tmp");
+			unlink(PGSIQ_SNAP_FILE ".tmp");
 			saved = true;		/* the reset marked the state dirty */
 		}
 		LWLockRelease(pgsiq->lock);
+		if (!renamed)
+			unlink(PGSIQ_SNAP_FILE ".tmp");
 	}
 	pfree(entries);
 
+	/* Make the rename durable; outside the lock. */
+	if (renamed)
+		(void) fsync_fname_ext(PG_STAT_TMP_DIR, true, false, LOG);
+
 	if (!saved)
-	{
-		SpinLockAcquire(&pgsiq->mutex);
-		pgsiq->dirty = true;
-		SpinLockRelease(&pgsiq->mutex);
-	}
+		mark_dirty();
 }
 
 /* Background worker: save every save_interval seconds. */
@@ -753,7 +818,7 @@ pgsiq_saver_main(Datum main_arg)
 			ProcessConfigFile(PGC_SIGHUP);
 			/* No snapshot to reload after a crash (as at startup). */
 			if (!pgsiq_save || pgsiq_save_interval == 0)
-				unlink(PGSIQ_DUMP_FILE);
+				unlink(PGSIQ_SNAP_FILE);
 		}
 
 		if (pgsiq_save && pgsiq_save_interval > 0)
@@ -843,12 +908,42 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	bool		bump;
 
 	/*
+	 * A cursor's query gets no query ID (only the DECLARE statement itself
+	 * is jumbled), so it would never be recorded. Give it the ID the same
+	 * query gets when run on its own.
+	 */
+	if (pgsiq && IsA(parsetree, DeclareCursorStmt) && IsQueryIdEnabled())
+	{
+		DeclareCursorStmt *cstmt = (DeclareCursorStmt *) parsetree;
+
+		if (cstmt->query != NULL && IsA(cstmt->query, Query) &&
+			((Query *) cstmt->query)->queryId == UINT64CONST(0))
+		{
+			if (readOnlyTree)
+			{
+				pstmt = copyObject(pstmt);
+				readOnlyTree = false;
+				parsetree = pstmt->utilityStmt;
+				cstmt = (DeclareCursorStmt *) parsetree;
+			}
+#if PG_VERSION_NUM >= 160000
+			(void) JumbleQuery((Query *) cstmt->query);
+#else
+			(void) JumbleQuery((Query *) cstmt->query, queryString);
+#endif
+		}
+	}
+
+	/*
 	 * Statements run inside a utility command (DO blocks, CALL, EXPLAIN
 	 * ANALYZE, CREATE TABLE AS ...) count as nested, not top level. EXECUTE
 	 * and PREPARE are the exception, as in pg_stat_statements: the prepared
-	 * query is the user's top-level statement.
+	 * query is the user's top-level statement. So are CLOSE and DISCARD:
+	 * closing a cursor ends its query (ExecutorEnd), which the user ran at
+	 * top level.
 	 */
-	bump = !(IsA(parsetree, ExecuteStmt) || IsA(parsetree, PrepareStmt));
+	bump = !(IsA(parsetree, ExecuteStmt) || IsA(parsetree, PrepareStmt) ||
+			 IsA(parsetree, ClosePortalStmt) || IsA(parsetree, DiscardStmt));
 
 	if (!bump)
 	{
@@ -1381,8 +1476,10 @@ pgsiq_ExecutorEnd(QueryDesc *queryDesc)
 {
 	uint64		queryid = (uint64) queryDesc->plannedstmt->queryId;
 
+	/* Plain EXPLAIN (no ANALYZE) runs nothing: not a use. */
 	if (pgsiq && queryid != UINT64CONST(0) &&
 		queryDesc->planstate != NULL &&
+		!(queryDesc->estate->es_top_eflags & EXEC_FLAG_EXPLAIN_ONLY) &&
 		pgsiq_enabled(nesting_level))
 	{
 		int64		weight = 1;
@@ -1403,7 +1500,12 @@ pgsiq_ExecutorEnd(QueryDesc *queryDesc)
 				}
 			}
 			else
-				weight = (int64) rint(1.0 / pgsiq_sample_rate);
+			{
+				/* Clamped: a tiny rate must not overflow int64. */
+				double		w = rint(1.0 / pgsiq_sample_rate);
+
+				weight = (w > 1e9) ? (int64) 1000000000 : (int64) w;
+			}
 		}
 
 		if (!skip)
@@ -1629,6 +1731,7 @@ pg_stat_index_queries_reset(PG_FUNCTION_ARGS)
 
 	/* A crash after a reset must not bring back the old counters. */
 	pgsiq->reset_count++;
+	unlink(PGSIQ_SNAP_FILE);
 	unlink(PGSIQ_DUMP_FILE);
 
 	LWLockRelease(pgsiq->lock);

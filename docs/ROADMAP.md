@@ -17,4 +17,4 @@
 | later | Find the ~3% on tiny read-only statements: `perf stat` (IPC, cache misses), `track = none` vs off to split hook cost from recording | Only if users report it matters |
 | later | PGXN release, PGDG packaging request | Outside users exist |
 
-Stop rule: if 8 weeks after the public release there are no outside users, issues or mentions, stop adding features and keep it as private audit tooling.
+Stop rule (public since 28 Oct 2026, so checked on 23 Dec 2026): if 8 weeks after the public release there are no outside users, issues or mentions, stop adding features and keep it as private audit tooling.

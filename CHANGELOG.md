@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Repository made public; README gains contributing / security / support links (homepage databasedeveloper.dev); SECURITY.md describes private reporting and every file and process the extension uses.
+
 ## 0.10 (2026-10-28): native 0.10, SQL edition pg_index_deps 0.7
 - **Production review (28 Oct 2026).** Whole C file read for failure cases; each suspected case tested on PG 17; then an assertion + ASan/UBSan build of PostgreSQL 15, 17 and 18 and a stress harness (`test/stress/`). Fixed:
   - **Foreign-key indexes were called drop candidates.** Foreign-key checks run as nested statements, which `track = top` (the default) doesn't record: `DELETE FROM parent` recorded only `parent_pkey`. `pg_index_role` / `index_deps.index_role` now note "supports foreign key …" and set a `drop_blocker` for an index whose leading key columns are a foreign key's columns (any order), or, when no index matches that, one that starts with one of them. Upgrade scripts 0.9 → 0.10 and 0.6 → 0.7; new test `fk_support` in both editions.

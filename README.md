@@ -176,7 +176,12 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 - [pg_stat_plans](https://github.com/pganalyze/pg_stat_plans): plans per query; the SQL edition reads it
 - [HypoPG](https://github.com/HypoPG/hypopg): hypothetical and hidden indexes; used by `index_drop_impact()`
 - [pg_ash](https://github.com/NikolayS/pg_ash), [pgsentinel](https://github.com/pgsentinel/pgsentinel): active session history (what sessions were waiting on); a different, complementary question
-- pg_regression_watch (sister project): which query regressed, when and why
+
+## Contributing, security, support
+
+- Bugs and questions: [GitHub issues](https://github.com/kiransabne04/pg_stat_index_queries/issues). Pull requests: see [CONTRIBUTING.md](CONTRIBUTING.md).
+- Vulnerabilities: report privately, see [SECURITY.md](SECURITY.md).
+- Built and maintained by Kiran Sabne. Help with PostgreSQL performance and index reviews: [databasedeveloper.dev](https://databasedeveloper.dev).
 
 ## License
 

@@ -92,6 +92,18 @@ Every ERROR in the stress logs is one the harness causes (cancel, terminate, cra
 
 Found and fixed by this round (details in CHANGELOG 0.10): `save_interval` raised by a reload saved nothing when the server started with 0; the views failed with `cache lookup failed` when an index was dropped while they ran; the first harness version reported OOM kills of backends as crashes: ASan's default 256 MB quarantine per process exhausts an 8 GB Docker VM, so the image sets `quarantine_size_mb=8`.
 
+### Rerun after the 29 Oct 2026 review (native 0.10.1)
+
+Same harness, with two new noise cases: `ALTER TABLE tN ALTER COLUMN a|b TYPE bigint|int` (index rebuilds whose history moves to the new OIDs; on `b` it races the noise loop's DROP/CREATE of `tN_bc`), and the report now prints how many `tN` columns ended as `bigint` (proof the ALTERs ran) and the statements behind any `deadlock detected`.
+
+| Build | Regression + TAP | Stress |
+|---|---|---|
+| PG 15.15 assert + ASan/UBSan | 13 suites + TAP pass | `DUR=45`: ~557k transactions, 5 intended SIGKILLs, counters kept (197 → 197), 13 columns left `bigint`, NO FINDINGS |
+| PG 17.11 assert + ASan/UBSan | pass | `DUR=120`: ~1.6M transactions, 192 → 192, NO FINDINGS (before the `bigint` evidence line); `DUR=60`: ~687k, 199 → 199, 21 `bigint`, NO FINDINGS |
+| PG 18.1 assert + ASan/UBSan | pass | `DUR=120`: ~1.29M transactions, 192 → 192, 39 `bigint`, NO FINDINGS |
+
+No sanitizer report, TRAP, PANIC or `deadlock detected` in any run; the only ERRORs are the harness's own cancels, terminations, shutdowns and restarts (plus, on PG 17, PostgreSQL's parallel-worker messages on cancel).
+
 ## Index lab (Docker, 24 Oct 2026)
 
 Command: `sql_edition/validation/lab/run.sh`, run against the Docker playground image.
@@ -99,6 +111,15 @@ Command: `sql_edition/validation/lab/run.sh`, run against the Docker playground 
 - Scale 1: about 3.8M rows and 76 indexes. Each run takes about 12 s.
 - "rds" means `--simulate-rds` (plan_source = none).
 - Counts include the native ground-truth rows.
+
+**29 Oct 2026** (SQL edition 0.8, native 0.10.1, after the review):
+
+| Run | PASS | FAIL | KNOWN |
+|---|---|---|---|
+| PG 16.15 / 17.11 / 18.6 | 193 | 0 | 5 |
+| PG 17.11, rds | 113 | 0 | 2 |
+
+The first run failed E-no-hypopg (PG 16–18: drop impact ran without HypoPG instead of raising, and so reported no change with the index still visible) and E-unprivileged (PG 16 and 18: "permission denied for schema lab_native" for a role without access to the native extension's schema). Both came from 0.8's extension lookup and were fixed before release (CHANGELOG, SQL edition 0.8; `security` test case 4).
 
 **26 Oct 2026** (SQL edition 0.6, native 0.7, with the T08 statistics checks S-*):
 

@@ -64,6 +64,17 @@ SELECT count(*) AS rows FROM index_deps.index_drop_impact('public.sec_t_pkey');
 SELECT current_setting('search_path') AS search_path;
 RESET search_path;
 
+-- 4. Without HypoPG, or without the right to use it, the check refuses to
+--    run instead of planning with the index still visible.
+DROP EXTENSION hypopg;
+SELECT count(*) FROM index_deps.index_drop_impact('public.sec_t_pkey');
+CREATE EXTENSION hypopg;
+REVOKE EXECUTE ON FUNCTION hypopg_hide_index(oid) FROM PUBLIC;
+SET ROLE siq_low;
+SELECT count(*) FROM index_deps.index_drop_impact('public.sec_t_pkey');
+RESET ROLE;
+GRANT EXECUTE ON FUNCTION hypopg_hide_index(oid) TO PUBLIC;
+
 DROP TABLE sec_t;
 DROP SCHEMA siq_low CASCADE;
 DROP ROLE siq_low;

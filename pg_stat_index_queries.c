@@ -2118,8 +2118,8 @@ pg_stat_index_queries_reset(PG_FUNCTION_ARGS)
 	check_loaded();
 
 	/*
-	 * Drops this backend's pending counts too. Other backends' pending
-	 * counts (at most flush_interval old) still arrive after the reset.
+	 * Discard this backend's pending counts. Other backends discard
+	 * pending entries from an earlier reset epoch when they next flush.
 	 */
 	pending_discard();
 

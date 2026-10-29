@@ -124,6 +124,30 @@ SKIP:
 	$holder->quit;
 }
 
+SKIP:
+{
+	skip 'ALTER COLUMN SET EXPRESSION needs PostgreSQL 17+', 4 if $node->pg_version < 17;
+
+	# 8. SET EXPRESSION rebuilds the indexes on a generated column under new
+	#    OIDs; their history moves, and no other index's history does.
+	$node->safe_psql('postgres', q{
+		CREATE TABLE h (id int PRIMARY KEY, a int, c int GENERATED ALWAYS AS (a * 2) STORED);
+		CREATE INDEX h_c_idx ON h (c);
+		CREATE INDEX h_a_idx ON h (a);
+		INSERT INTO h (id, a) SELECT x, x FROM generate_series(1, 100) x;
+		SET enable_seqscan = off;
+		SELECT id FROM h WHERE c = 4; SELECT id FROM h WHERE c = 6; SELECT id FROM h WHERE a = 1;});
+	my $before = $node->safe_psql('postgres', q{SELECT 'h_c_idx'::regclass::oid || ',' || 'h_a_idx'::regclass::oid});
+	$node->safe_psql('postgres', q{ALTER TABLE h ALTER COLUMN c SET EXPRESSION AS (a * 3)});
+	my ($c_old, $a_old) = split /,/, $before;
+	is($node->safe_psql('postgres', qq{SELECT 'h_c_idx'::regclass::oid <> $c_old AND 'h_a_idx'::regclass::oid = $a_old}),
+		't', 'SET EXPRESSION rebuilds only the index on the generated column');
+	is(calls('h_c_idx'), '2', 'rebuilt index keeps its own history');
+	is(calls('h_a_idx'), '1', 'other index unchanged');
+	is($node->safe_psql('postgres', qq{SELECT count(*) FROM pg_stat_index_queries WHERE indexrelid = $c_old}),
+		'0', 'nothing left under the old OID');
+}
+
 # 4. Files with impossible content are rejected as a whole.
 $node->safe_psql('postgres', q{SET enable_seqscan = off; SELECT count(*) FROM f WHERE a = 5;});
 my ($dbid, $relid, $queryid) = split /\|/, $node->safe_psql('postgres', q{

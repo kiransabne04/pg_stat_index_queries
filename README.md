@@ -1,5 +1,8 @@
 # pg_stat_index_queries
 
+> [!WARNING]
+> **Experimental project, work in progress.** It has not been run in production, and its views, functions and behaviour may change between versions. Try it on a non-production system first and benchmark it on your own hardware.
+
 **Which queries use this index?** Postgres tells you how many times an index was scanned (`idx_scan`) and, since PG 16, when it was last used. It never tells you *which queries* depend on it. This repository answers that question, and estimates what happens to those queries if the index is dropped.
 
 ```sql

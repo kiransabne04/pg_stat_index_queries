@@ -65,6 +65,43 @@ SELECT c.relname, coalesce(sum(s.calls_executed), 0) AS calls
  WHERE c.relname = 'rv_pkey'
  GROUP BY 1;
 
+-- 4. Which rebuilt indexes keep their history. Partition indexes do.
+--    Expression, partial and collation indexes keep it when the rebuilt
+--    definition prints the same; one that prints differently starts from
+--    zero (missing a carry-over is the safe side). A statement that also
+--    adds or drops a constraint carries nothing over: the same name could
+--    then belong to a different index.
+CREATE TABLE rvp (id int, a int) PARTITION BY RANGE (id);
+CREATE TABLE rvp_1 PARTITION OF rvp FOR VALUES FROM (0) TO (500);
+CREATE TABLE rvp_2 PARTITION OF rvp FOR VALUES FROM (500) TO (1000);
+CREATE INDEX rvp_a_idx ON rvp (a);
+INSERT INTO rvp SELECT g, g % 10 FROM generate_series(0, 999) g;
+CREATE TABLE rv2 (id int PRIMARY KEY, s text, d int);
+CREATE INDEX rv2_lower_idx ON rv2 (lower(s));
+CREATE INDEX rv2_part_idx ON rv2 (d) WHERE d > 10;
+CREATE INDEX rv2_c_idx ON rv2 (s COLLATE "C");
+INSERT INTO rv2 SELECT g, 'v' || g, g FROM generate_series(1, 1000) g;
+VACUUM ANALYZE rvp, rv2;
+SELECT pg_stat_index_queries_reset();
+SELECT count(*) FROM rvp WHERE a = 3;
+SELECT count(*) FROM rv2 WHERE lower(s) = 'v5';
+SELECT count(*) FROM rv2 WHERE d = 20;
+SELECT count(*) FROM rv2 WHERE s = 'v7' COLLATE "C";
+SELECT count(*) FROM rv2 WHERE id = 9;
+ALTER TABLE rvp ALTER COLUMN a TYPE bigint;
+ALTER TABLE rv2 ALTER COLUMN s TYPE varchar(100), ALTER COLUMN d TYPE bigint;
+SELECT c.relname, coalesce(sum(s.calls_executed), 0) AS calls
+  FROM pg_class c LEFT JOIN pg_stat_index_queries s ON s.indexrelid = c.oid
+ WHERE c.relname IN ('rvp_1_a_idx', 'rvp_2_a_idx', 'rv2_lower_idx', 'rv2_part_idx', 'rv2_c_idx', 'rv2_pkey')
+ GROUP BY 1 ORDER BY 1;
+SELECT pg_get_indexdef('rv2_lower_idx'::regclass) AS lower_idx_after;
+ALTER TABLE rv2 ALTER COLUMN d TYPE int, DROP CONSTRAINT rv2_pkey, ADD CONSTRAINT rv2_pkey PRIMARY KEY (id);
+SELECT c.relname, coalesce(sum(s.calls_executed), 0) AS calls
+  FROM pg_class c LEFT JOIN pg_stat_index_queries s ON s.indexrelid = c.oid
+ WHERE c.relname IN ('rv2_part_idx', 'rv2_pkey')
+ GROUP BY 1 ORDER BY 1;
+DROP TABLE rvp, rv2;
+
 RESET enable_seqscan;
 DROP FUNCTION rv_many();
 DO $$ BEGIN FOR i IN 1..70 LOOP EXECUTE format('DROP TABLE rv_m%s', i); END LOOP; END $$;

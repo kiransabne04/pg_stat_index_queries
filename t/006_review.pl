@@ -4,7 +4,10 @@
 # - first_seen is the earliest time any session saw the pair;
 # - a reset discards counts other sessions had not flushed yet;
 # - a stats file with impossible counters or trailing bytes is rejected;
-# - counters saturate instead of overflowing.
+# - counters saturate instead of overflowing;
+# - only ALTER TABLE subcommands that rebuild indexes look at tracked
+#   indexes, and an index busy in another session is skipped without
+#   making the ALTER wait or fail.
 use strict;
 use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
@@ -71,6 +74,54 @@ SKIP:
 	usleep(500_000);
 	$node->poll_query_until('postgres', q{SELECT count(*) = 0 FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()});
 	is(calls('f_pkey'), '0', 'counts from before a reset do not arrive after it');
+}
+
+# 6. ALTER TABLE subcommands that keep index OIDs skip the capture; ALTER
+#    COLUMN TYPE does it (logged at DEBUG1).
+$node->safe_psql('postgres', q{
+	CREATE TABLE g (id int PRIMARY KEY, b int);
+	CREATE INDEX g_b_idx ON g (b);
+	INSERT INTO g SELECT x, x FROM generate_series(1, 100) x;
+	SET enable_seqscan = off; SELECT b FROM g WHERE id = 1; SELECT id FROM g WHERE b = 1;});
+my $alterlog = -s $node->logfile;
+$node->safe_psql('postgres', q{
+	SET log_min_messages = debug1;
+	ALTER TABLE g SET (fillfactor = 90);
+	ALTER TABLE g ADD COLUMN z int;
+	ALTER TABLE g ALTER COLUMN b SET STATISTICS 200;
+	ALTER TABLE g ALTER COLUMN z TYPE bigint, ALTER COLUMN b TYPE bigint;});
+my @captures = (slurp_file($node->logfile, $alterlog) =~ /ALTER TABLE may rebuild (\d+) tracked indexes/g);
+is(scalar(@captures), 1, 'only ALTER COLUMN TYPE looks at tracked indexes');
+is($captures[0], '2', 'it looks at the indexes of that table');
+is(calls('g_b_idx'), '1', 'history kept through ALTER COLUMN TYPE');
+
+SKIP:
+{
+	skip 'background_psql API needs PostgreSQL 16+', 4 if $node->pg_version < 16;
+
+	# 7. A table locked by another session (DROP INDEX in an open
+	#    transaction): the capture doesn't wait for it, which could deadlock
+	#    with that session; the ALTER then waits for its own lock as usual
+	#    and succeeds. The rebuilt index starts from zero; an index the ALTER
+	#    doesn't rebuild is untouched.
+	my $holder = $node->background_psql('postgres');
+	$holder->query_safe(q{BEGIN});
+	$holder->query_safe(q{DROP INDEX g_b_idx});
+	my $alter = $node->background_psql('postgres');
+	$alter->query_until(qr/started/, "\\echo started\nALTER TABLE g ALTER COLUMN b TYPE int;\n");
+	$node->poll_query_until('postgres',
+		q{SELECT count(*) = 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'ALTER TABLE g %'})
+	  or die 'ALTER never waited for the table lock';
+	$holder->query_safe(q{ROLLBACK});
+	$alter->query_until(qr/finished/, "\\echo finished\n");
+	unlike($alter->{stderr}, qr/ERROR/, 'ALTER succeeded while an index was busy');
+	is($node->safe_psql('postgres',
+			q{SELECT atttypid::regtype FROM pg_attribute WHERE attrelid = 'g'::regclass AND attname = 'b'}),
+		'integer', 'column type changed');
+	is(calls('g_b_idx'), '0', 'busy table skipped: no history carried');
+	is(calls('g_pkey'), '1', 'index not rebuilt is untouched');
+	$alter->quit;
+	$holder->quit;
 }
 
 # 4. Files with impossible content are rejected as a whole.

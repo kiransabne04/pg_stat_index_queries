@@ -298,8 +298,10 @@ static bool pgsiq_write_file(const char *path, const pgsiqEntry *entries,
 							 TimestampTz stats_reset, bool sampled);
 static void pgsiq_periodic_save(void);
 static inline void mark_dirty(void);
+static bool alter_rebuilds_indexes(AlterTableStmt *stmt);
+static char *indexdef_nowait(Oid index);
 static pgsiqReindexed *reindex_capture(int *n, Oid table);
-static void reindex_rekey(pgsiqReindexed *idx, int n);
+static void reindex_rekey(pgsiqReindexed *idx, int n, Oid table);
 
 PG_FUNCTION_INFO_V1(pg_stat_index_queries);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_0_8);
@@ -593,7 +595,12 @@ pgsiq_read_file(const char *path)
 		temp.key.queryid = raw.queryid;
 		temp.key.toplevel = (*((unsigned char *) &raw.toplevel) == 1);
 
-		/* Never exceed the configured size; the rest is still validated. */
+		/*
+		 * Never exceed the configured size. Records past it are still
+		 * checked field by field above, but not for repeated keys (that
+		 * would need all keys in memory): the duplicate check covers the
+		 * entries that are loaded.
+		 */
 		if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
 			continue;
 
@@ -1036,6 +1043,7 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		pgsiqReindexed *reindexed = NULL;
 		int			nreindexed = 0;
+		Oid			table = InvalidOid;
 
 		/*
 		 * REINDEX CONCURRENTLY and ALTER TABLE ... ALTER COLUMN TYPE give
@@ -1043,10 +1051,11 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 		 */
 		if (IsA(parsetree, ReindexStmt))
 			reindexed = reindex_capture(&nreindexed, InvalidOid);
-		else if (IsA(parsetree, AlterTableStmt) && pgsiq)
+		else if (IsA(parsetree, AlterTableStmt) && pgsiq &&
+				 alter_rebuilds_indexes((AlterTableStmt *) parsetree))
 		{
-			Oid			table = RangeVarGetRelid(((AlterTableStmt *) parsetree)->relation,
-												 NoLock, true);
+			table = RangeVarGetRelid(((AlterTableStmt *) parsetree)->relation,
+									 NoLock, true);
 
 			if (OidIsValid(table) && get_rel_relkind(table) != RELKIND_INDEX &&
 				get_rel_relkind(table) != RELKIND_PARTITIONED_INDEX)
@@ -1061,7 +1070,7 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 									params, queryEnv, dest, qc);
 
 		if (reindexed)
-			reindex_rekey(reindexed, nreindexed);
+			reindex_rekey(reindexed, nreindexed, table);
 	}
 	PG_FINALLY();
 	{
@@ -1079,6 +1088,45 @@ oid_cmp_reindexed(const void *lhs, const void *rhs)
 	Oid			r = ((const pgsiqReindexed *) rhs)->oldoid;
 
 	return (l < r) ? -1 : (l > r) ? 1 : 0;
+}
+
+/*
+ * True if an ALTER TABLE rebuilds indexes under new OIDs: ALTER COLUMN TYPE
+ * and (PG 17+) SET EXPRESSION recreate every index on the changed columns
+ * from its own definition. Other subcommands keep index OIDs and skip the
+ * capture. False as well when the statement also adds or drops an index or
+ * constraint, which could leave a different index under a rebuilt one's
+ * name: missing a carry-over is better than giving an index another's
+ * history.
+ */
+static bool
+alter_rebuilds_indexes(AlterTableStmt *stmt)
+{
+	ListCell   *lc;
+	bool		rebuilds = false;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = lfirst_node(AlterTableCmd, lc);
+
+		switch (cmd->subtype)
+		{
+			case AT_AlterColumnType:
+#if PG_VERSION_NUM >= 170000
+			case AT_SetExpression:
+#endif
+				rebuilds = true;
+				break;
+			case AT_AddIndex:
+			case AT_AddConstraint:
+			case AT_AddIndexConstraint:
+			case AT_DropConstraint:
+				return false;
+			default:
+				break;
+		}
+	}
+	return rebuilds;
 }
 
 /* True if index is on table, or on a partition (at any depth) of it. */
@@ -1102,6 +1150,33 @@ index_on_table(Oid index, Oid table)
 }
 
 /*
+ * pg_get_indexdef_string(index), or NULL if the index is gone or another
+ * session holds a lock in the way. pg_get_indexdef_string locks the index's
+ * table; waiting there while holding the index could deadlock with that
+ * session and fail the user's statement. So the table, then the index, are
+ * locked without waiting, as PostgreSQL orders them. Locks this transaction
+ * already holds (an ALTER's own new indexes) are granted at once.
+ */
+static char *
+indexdef_nowait(Oid index)
+{
+	Oid			heap = IndexGetRelation(index, true);
+	char	   *def = NULL;
+
+	if (!OidIsValid(heap) || !ConditionalLockRelationOid(heap, AccessShareLock))
+		return NULL;
+	if (ConditionalLockRelationOid(index, AccessShareLock))
+	{
+		if (SearchSysCacheExists1(RELOID, ObjectIdGetDatum(index)) &&
+			IndexGetRelation(index, true) == heap)
+			def = pg_get_indexdef_string(index);
+		UnlockRelationOid(index, AccessShareLock);
+	}
+	UnlockRelationOid(heap, AccessShareLock);
+	return def;
+}
+
+/*
  * Before a REINDEX or ALTER TABLE: the name and schema of every index
  * tracked in this database (for ALTER TABLE: only the indexes of that table
  * and its partitions, with their definitions), sorted by OID. Allocated in
@@ -1118,6 +1193,7 @@ reindex_capture(int *n, Oid table)
 	int			nall;
 	int			i;
 	int			j;
+	Oid			prev = InvalidOid;
 
 	*n = 0;
 	if (!pgsiq || !pgsiq_hash)
@@ -1144,44 +1220,54 @@ reindex_capture(int *n, Oid table)
 	j = 0;
 	for (i = 0; i < nall; i++)
 	{
+		Oid			oid = idx[i].oldoid;
 		char	   *name;
+		char	   *def = NULL;
+		Oid			nspid = InvalidOid;
 
-		if (j > 0 && idx[j - 1].oldoid == idx[i].oldoid)
+		if (oid == prev)
 			continue;
-		if (OidIsValid(table) && !index_on_table(idx[i].oldoid, table))
-			continue;
-		name = get_rel_name(idx[i].oldoid);
-		if (name == NULL)
-			continue;
-		idx[j].def = NULL;
+		prev = oid;
+
 		if (OidIsValid(table))
 		{
 			/*
-			 * ALTER TABLE has not locked anything yet, and
-			 * pg_get_indexdef_string errors on an index dropped meanwhile.
-			 * Hold it against DROP INDEX while reading; never wait (no
-			 * deadlock with the ALTER's own locks), skip it instead.
+			 * ALTER TABLE has not locked anything yet. index_on_table only
+			 * uses lookups that return nothing for a dropped index;
+			 * indexdef_nowait never waits. An index that is busy or gone
+			 * keeps no history, and the ALTER never waits or fails here.
 			 */
-			if (!ConditionalLockRelationOid(idx[i].oldoid, AccessShareLock))
+			if (!index_on_table(oid, table))
+				continue;
+			def = indexdef_nowait(oid);
+			if (def == NULL)
+				continue;
+			name = get_rel_name(oid);
+			if (name == NULL)
 			{
-				pfree(name);
+				pfree(def);
 				continue;
 			}
-			if (SearchSysCacheExists1(RELOID, ObjectIdGetDatum(idx[i].oldoid)))
-				idx[j].def = pg_get_indexdef_string(idx[i].oldoid);
-			UnlockRelationOid(idx[i].oldoid, AccessShareLock);
-			if (idx[j].def == NULL)
-			{
-				pfree(name);
-				continue;
-			}
+			nspid = get_rel_namespace(oid);
 		}
-		idx[j].oldoid = idx[i].oldoid;
+		else
+		{
+			name = get_rel_name(oid);
+			if (name == NULL)
+				continue;
+			nspid = get_rel_namespace(oid);
+		}
+		idx[j].oldoid = oid;
 		idx[j].newoid = InvalidOid;
-		idx[j].nspid = get_rel_namespace(idx[i].oldoid);
+		idx[j].nspid = nspid;
 		idx[j].name = name;
+		idx[j].def = def;
 		j++;
 	}
+
+	if (OidIsValid(table))
+		elog(DEBUG1, "pg_stat_index_queries: ALTER TABLE may rebuild %d tracked indexes of relation %u",
+			 j, table);
 
 	MemoryContextSwitchTo(old);
 
@@ -1198,14 +1284,15 @@ reindex_capture(int *n, Oid table)
  * After a REINDEX or ALTER TABLE: an index whose old OID is gone and whose
  * name now belongs to a different OID was rebuilt (REINDEX CONCURRENTLY;
  * ALTER TABLE ... ALTER COLUMN TYPE rebuilds a table's indexes). For ALTER
- * TABLE the definition must also be unchanged: a constraint dropped and
- * re-added on other columns under the same name is a new index. Move its
- * entries to the new OID, merging with any the new index already has. Other sessions'
- * not yet flushed counts still arrive under the old OID, which the views
- * ignore.
+ * TABLE (table valid) the new index must also be on the same table and have
+ * the same definition: PostgreSQL rebuilds it by running the old index's
+ * pg_get_indexdef_string, so anything else is a different index and keeps
+ * no history. Move its entries to the new OID, merging with any the new
+ * index already has. Other sessions' not yet flushed counts still arrive
+ * under the old OID, which the views ignore.
  */
 static void
-reindex_rekey(pgsiqReindexed *idx, int n)
+reindex_rekey(pgsiqReindexed *idx, int n, Oid table)
 {
 	HASH_SEQ_STATUS hash_seq;
 	pgsiqEntry *entry;
@@ -1223,15 +1310,28 @@ reindex_rekey(pgsiqReindexed *idx, int n)
 			(get_rel_relkind(newoid) == RELKIND_INDEX ||
 			 get_rel_relkind(newoid) == RELKIND_PARTITIONED_INDEX))
 		{
-			char	   *newdef = idx[i].def ? pg_get_indexdef_string(newoid) : NULL;
+			bool		same = (idx[i].def == NULL);
 
-			if (idx[i].def == NULL || strcmp(idx[i].def, newdef) == 0)
+			/*
+			 * The name may now belong to another session's index on another
+			 * table, which nothing stops from being dropped while it is read:
+			 * check the table first, then read without waiting.
+			 */
+			if (!same && index_on_table(newoid, table))
+			{
+				char	   *newdef = indexdef_nowait(newoid);
+
+				if (newdef)
+				{
+					same = (strcmp(idx[i].def, newdef) == 0);
+					pfree(newdef);
+				}
+			}
+			if (same)
 			{
 				idx[i].newoid = newoid;
 				nchanged++;
 			}
-			if (newdef)
-				pfree(newdef);
 		}
 		if (oldname)
 			pfree(oldname);
@@ -1504,6 +1604,7 @@ pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
 	TimestampTz now = GetCurrentStatementStartTimestamp();
 	uint64		epoch = pg_atomic_read_u64(&pgsiq->reset_count);
 	bool		publish = false;
+	bool		trusted_known = false;
 	int			i;
 
 	known_validate();
@@ -1550,6 +1651,8 @@ pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
 			p->epoch = epoch;
 			if (!known_in_shared(&key))
 				publish = true;
+			else
+				trusted_known = true;
 		}
 		p->calls_planned = add_sat(p->calls_planned, weight);
 		if (ctx->seen[i].executed)
@@ -1558,6 +1661,15 @@ pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
 		p->cond_cols |= ctx->seen[i].cond_cols;
 		p->order_cols |= ctx->seen[i].order_cols;
 	}
+
+	/*
+	 * A reset or eviction after known_validate() may have removed a pair
+	 * trusted above as known; publish then. One that happens after this
+	 * check is an ordinary eviction (the counts arrive with the next flush).
+	 */
+	if (trusted_known &&
+		pg_atomic_read_u64(&pgsiq->change_count) != known_change_count)
+		publish = true;
 
 	if (publish || pgsiq_flush_interval == 0 ||
 		hash_get_num_entries(pending_hash) >= PGSIQ_MAX_PENDING)

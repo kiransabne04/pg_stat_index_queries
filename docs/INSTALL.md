@@ -39,6 +39,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.8 → 0.9:** no restart (SQL only): `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';`. Adds the view `pg_index_sole_path`; nothing is dropped.
 
+**Upgrading 0.10 → 0.10.1:** install the new build and **restart**. No `ALTER EXTENSION`: no SQL objects changed, and the extension version stays `0.10`. Saved counters are kept.
+
 **Upgrading 0.9 → 0.10:** install the new build, **restart** (the library changed), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.10';` (replaces `pg_index_role`; nothing is dropped). Saved counters are kept.
 - New setting `save_interval` (default 300 s): counters are also saved every 5 minutes to `pg_stat_tmp/`, so a crash loses at most that much. `save_interval = 0` keeps the old behaviour.
 - One extra process, `pg_stat_index_queries saver`, shows up in `ps` (not in `pg_stat_activity`: it has no database connection). It takes one `max_worker_processes` slot (default 8, shared with parallel query and logical replication); raise `max_worker_processes` by one if you rely on every slot.

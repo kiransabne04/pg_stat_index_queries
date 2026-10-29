@@ -50,7 +50,8 @@ GRANT SELECT ON index_deps.config TO PUBLIC;
 -- extension p_ext, or NULL. p_ext NULL: a function in pg_catalog or in any
 -- extension (aurora_stat_plans is built into Aurora). Other extensions'
 -- objects are called by this name, never through the caller's search_path,
--- so a same-named function in a schema earlier in it never runs.
+-- so a same-named function in a schema earlier in it never runs. One the
+-- caller may not use (no USAGE on its schema, no EXECUTE) counts as absent.
 CREATE FUNCTION index_deps.ext_function(p_ext name, p_name name, p_args regtype[])
 RETURNS text
 LANGUAGE sql STABLE
@@ -61,6 +62,8 @@ AS $$
       JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE p.proname = p_name
        AND p.proargtypes = array_to_string(p_args::oid[], ' ')::oidvector
+       AND has_schema_privilege(n.oid, 'USAGE')
+       AND has_function_privilege(p.oid, 'EXECUTE')
        AND (EXISTS (SELECT 1
                       FROM pg_depend d
                       JOIN pg_extension e ON e.oid = d.refobjid
@@ -73,7 +76,8 @@ AS $$
 $$;
 
 -- Schema-qualified name of relation p_name that belongs to extension
--- p_ext, or NULL.
+-- p_ext, or NULL; also NULL when the caller may not read it (no USAGE on
+-- its schema or no SELECT).
 CREATE FUNCTION index_deps.ext_relation(p_ext name, p_name name)
 RETURNS text
 LANGUAGE sql STABLE
@@ -86,6 +90,8 @@ AS $$
                       AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
       JOIN pg_extension e ON e.oid = d.refobjid AND e.extname = p_ext
      WHERE c.relname = p_name
+       AND has_schema_privilege(n.oid, 'USAGE')
+       AND has_table_privilege(c.oid, 'SELECT')
      LIMIT 1
 $$;
 
@@ -806,12 +812,16 @@ BEGIN
     IF current_setting('server_version_num')::int < 160000 THEN
         RAISE EXCEPTION 'index_drop_impact needs PostgreSQL 16 or later (EXPLAIN GENERIC_PLAN)';
     END IF;
-    v_hide := format('SELECT %s($1)', index_deps.ext_function('hypopg', 'hypopg_hide_index', '{oid}'));
-    v_unhide := format('SELECT %s($1)', index_deps.ext_function('hypopg', 'hypopg_unhide_index', '{oid}'));
+    v_hide := index_deps.ext_function('hypopg', 'hypopg_hide_index', '{oid}');
+    v_unhide := index_deps.ext_function('hypopg', 'hypopg_unhide_index', '{oid}');
+    -- Checked before format(): it turns NULL into '', and "SELECT ($1)"
+    -- would run without hiding anything.
     IF v_hide IS NULL OR v_unhide IS NULL THEN
         RAISE EXCEPTION 'HypoPG 1.4 or later is required'
-            USING HINT = 'CREATE EXTENSION hypopg;';
+            USING HINT = 'CREATE EXTENSION hypopg; this role also needs USAGE on its schema and EXECUTE on its functions';
     END IF;
+    v_hide := format('SELECT %s($1)', v_hide);
+    v_unhide := format('SELECT %s($1)', v_unhide);
     v_pgss := index_deps.ext_relation('pg_stat_statements', 'pg_stat_statements');
     IF v_pgss IS NULL THEN
         RAISE EXCEPTION 'pg_stat_statements is required (it provides the query text)';

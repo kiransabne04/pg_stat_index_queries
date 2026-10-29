@@ -100,10 +100,10 @@ SELECT left(query, 45) AS query, cost_with IS NOT NULL AS planned,
  SELECT v FROM public.sec_t WHERE id = siq_low | t       | t
 (1 row)
 
-SELECT current_setting('siq.evil_ran_as') AS evil_ran_as;
- evil_ran_as 
--------------
- postgres
+SELECT current_setting('siq.evil_ran_as') = current_user AS evil_ran_as_caller;
+ evil_ran_as_caller 
+--------------------
+ t
 (1 row)
 
 SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();

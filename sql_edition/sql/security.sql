@@ -56,7 +56,7 @@ SELECT left(query, 45) AS query, cost_with IS NOT NULL AS planned,
        note LIKE '%planned with your privileges although recorded only by siq_low%' AS noted
   FROM index_deps.index_drop_impact('public.sec_t_pkey', p_trust_other_roles => true)
  WHERE query LIKE '%evil%';
-SELECT current_setting('siq.evil_ran_as') AS evil_ran_as;
+SELECT current_setting('siq.evil_ran_as') = current_user AS evil_ran_as_caller;
 SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
 -- search_path is the caller's again afterwards.
 SET search_path = siq_low, public;

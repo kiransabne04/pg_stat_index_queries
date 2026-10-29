@@ -1,0 +1,136 @@
+-- Security review (SQL edition 0.8).
+-- 1. index_drop_impact plans other users' query text. Planning runs
+--    IMMUTABLE functions with constant arguments with the caller's
+--    privileges (SET ROLE is no barrier: code in the query can undo it), so
+--    a query recorded only by a role without the caller's privileges is
+--    skipped unless p_trust_other_roles. The caller's own queries are
+--    planned.
+-- 2. Objects of other extensions (HypoPG, pg_stat_statements) are called by
+--    their extension's schema, so a same-named function earlier in the
+--    caller's search_path is never run.
+-- 3. A query text with ";" (possible only inside a comment) is skipped:
+--    EXECUTE would run a second statement.
+CREATE ROLE siq_low;
+CREATE SCHEMA siq_low AUTHORIZATION siq_low;
+CREATE TABLE sec_t (id int PRIMARY KEY, v int);
+INSERT INTO sec_t SELECT g, g FROM generate_series(1, 1000) g;
+ANALYZE sec_t;
+GRANT SELECT ON sec_t TO siq_low;
+SET ROLE siq_low;
+CREATE TABLE siq_low.log (who text, what text);
+-- Read-only commands are allowed in an IMMUTABLE function, and some are
+-- powerful in a superuser's hands (COPY ... TO PROGRAM, pg_read_file).
+-- Here it only records who ran it.
+CREATE FUNCTION siq_low.evil() RETURNS int LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+    PERFORM set_config('siq.evil_ran_as', current_user, false);
+    RETURN 1;
+END $$;
+CREATE FUNCTION siq_low.hypopg_hide_index(oid) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO siq_low.log VALUES (current_user, 'fake hypopg');
+    RETURN true;
+END $$;
+SELECT v FROM public.sec_t WHERE id = siq_low.evil();
+ v 
+---
+ 1
+(1 row)
+
+DELETE FROM siq_low.log;
+RESET ROLE;
+-- The caller's own queries: planned, except the one with ";" in a comment.
+SELECT v FROM public.sec_t WHERE id = 7;
+ v 
+---
+ 7
+(1 row)
+
+SELECT v FROM public.sec_t /* ; */ WHERE id = 5 AND v > 0;
+ v 
+---
+ 5
+(1 row)
+
+-- The caller has siq_low early in its search_path.
+SELECT set_config('siq.evil_ran_as', 'nobody', false) IS NOT NULL AS cleared;
+ cleared 
+---------
+ t
+(1 row)
+
+SET search_path = siq_low, public;
+SELECT left(query, 45) AS query, cost_with IS NOT NULL AS planned, note
+  FROM index_deps.index_drop_impact('public.sec_t_pkey')
+ ORDER BY 1;
+                     query                     | planned |                                                                                        note                                                                                         
+-----------------------------------------------+---------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ SELECT v FROM public.sec_t /* ; */ WHERE id = | f       | skipped: the query text contains ";" (in a comment or quoted name)
+ SELECT v FROM public.sec_t WHERE id = $1      | t       | candidates from captured plans
+ SELECT v FROM public.sec_t WHERE id = siq_low | f       | skipped: recorded only by siq_low, without your privileges; planning would run functions in its text as you (connect as that role to check it, or pass p_trust_other_roles => true)
+(3 rows)
+
+RESET search_path;
+-- evil() never ran.
+SELECT current_setting('siq.evil_ran_as') AS evil_ran_as;
+ evil_ran_as 
+-------------
+ nobody
+(1 row)
+
+-- The fake HypoPG function never ran.
+SELECT who, what, count(*) FROM siq_low.log GROUP BY 1, 2 ORDER BY 1, 2;
+ who | what | count 
+-----+------+-------
+(0 rows)
+
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+ still_hidden 
+--------------
+            0
+(1 row)
+
+-- p_trust_other_roles: planned with the caller's privileges, as documented.
+SELECT left(query, 45) AS query, cost_with IS NOT NULL AS planned,
+       note LIKE '%planned with your privileges although recorded only by siq_low%' AS noted
+  FROM index_deps.index_drop_impact('public.sec_t_pkey', p_trust_other_roles => true)
+ WHERE query LIKE '%evil%';
+                     query                     | planned | noted 
+-----------------------------------------------+---------+-------
+ SELECT v FROM public.sec_t WHERE id = siq_low | t       | t
+(1 row)
+
+SELECT current_setting('siq.evil_ran_as') AS evil_ran_as;
+ evil_ran_as 
+-------------
+ postgres
+(1 row)
+
+SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
+ still_hidden 
+--------------
+            0
+(1 row)
+
+-- search_path is the caller's again afterwards.
+SET search_path = siq_low, public;
+SELECT count(*) AS rows FROM index_deps.index_drop_impact('public.sec_t_pkey');
+ rows 
+------
+    3
+(1 row)
+
+SELECT current_setting('search_path') AS search_path;
+   search_path   
+-----------------
+ siq_low, public
+(1 row)
+
+RESET search_path;
+DROP TABLE sec_t;
+DROP SCHEMA siq_low CASCADE;
+NOTICE:  drop cascades to 3 other objects
+DETAIL:  drop cascades to table siq_low.log
+drop cascades to function siq_low.evil()
+drop cascades to function siq_low.hypopg_hide_index(oid)
+DROP ROLE siq_low;

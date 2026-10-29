@@ -8,7 +8,7 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.10 (SQL edition 0.7), experimental.** New here? Read the [user guide](docs/GUIDE.md): use cases, edge cases and limits. Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). 0.10 / SQL edition 0.7 adds the fixes from a production review, tested on assertion + sanitizer builds under stress ([TESTING](docs/TESTING.md#assertion--sanitizer-build-and-stress-28-oct-2026)). Don't rely on it in production until you've benchmarked it on your hardware.
+> **Status: 0.10 (SQL edition 0.7; 0.8 unreleased), experimental.** New here? Read the [user guide](docs/GUIDE.md): use cases, edge cases and limits. Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). 0.10 / SQL edition 0.7 adds the fixes from a production review, tested on assertion + sanitizer builds under stress ([TESTING](docs/TESTING.md#assertion--sanitizer-build-and-stress-28-oct-2026)). Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 
@@ -99,7 +99,7 @@ SELECT queryid, cost_ratio, plan_changed, note, drop_blocker FROM index_deps.ind
 | `unresolved_plan_indexes` | Index names in captured plans that no longer exist (renamed or dropped) |
 | `index_query_stats` | Same as the native `pg_index_query_stats`, with `index_plans`, `index_calls`, `scan_types`, `ambiguous` and `source` from the captured plans (stats also summed over top-level and nested) |
 | `index_no_dependents` | Indexes no captured plan mentions (partition-aware like the native view). Leaves out tables whose plans name a missing (renamed?) index. Empty when there is no plan source (`none`, e.g. RDS) |
-| `index_drop_impact(index)` | Cost and plan change per dependent query if the index were gone, plus `drop_blocker`. Works in read-only transactions (Aurora readers); `p_timeout_ms` is a time budget for the whole call. `note` warns when the table's statistics are stale or missing (0.6), since the estimates rest on them |
+| `index_drop_impact(index)` | Cost and plan change per dependent query if the index were gone, plus `drop_blocker`. Works in read-only transactions (Aurora readers); `p_timeout_ms` is a time budget for the whole call. `note` warns when the table's statistics are stale or missing (0.6), since the estimates rest on them. Queries recorded only by roles without your privileges are skipped unless `p_trust_other_roles => true` (0.8): planning runs functions in the query text with your privileges |
 | `config` | `plan_source`: auto, aurora_stat_plans, pg_stat_plans, none |
 
 ## Settings (native)

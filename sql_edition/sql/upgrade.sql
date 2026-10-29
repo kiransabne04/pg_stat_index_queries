@@ -54,7 +54,14 @@ SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
 SELECT drop_blocker LIKE 'foreign-key checks use it: up_child_pid_fkey%' AS fk_blocker
   FROM index_deps.index_role('up_child_pid_idx');
 DROP TABLE up_child, up_parent;
--- The upgraded objects (0.1 -> ... -> 0.7) must be identical to a fresh install.
+-- 0.7 -> 0.8: index_drop_impact gains p_trust_other_roles; helpers that
+-- find other extensions' objects by their extension.
+SELECT to_regprocedure('index_deps.ext_function(name, name, regtype[])') IS NULL AS helper_absent_in_0_7;
+ALTER EXTENSION pg_index_deps UPDATE TO '0.8';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
+SELECT to_regprocedure('index_deps.index_drop_impact(regclass, boolean, integer, integer)') IS NULL AS old_signature_gone,
+       to_regprocedure('index_deps.index_drop_impact(regclass, boolean, integer, integer, boolean)') IS NOT NULL AS new_signature;
+-- The upgraded objects (0.1 -> ... -> 0.8) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT 'function ' || p.oid::regprocedure::text AS name, pg_get_functiondef(p.oid) AS def
   FROM pg_proc p WHERE p.pronamespace = 'index_deps'::regnamespace

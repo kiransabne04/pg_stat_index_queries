@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **SQL edition 0.8: security fixes in `index_drop_impact`** (upgrade script 0.7 → 0.8; installers regenerated). From the 29 Oct 2026 security review:
+  - **Other roles' queries could run code as the caller.** Planning a query evaluates IMMUTABLE functions that have constant arguments, with the caller's privileges, so a low-privileged role could record `SELECT … WHERE id = myschema.f()` and have a superuser's drop-impact check run `f()` as superuser. A query is now planned only when a role with the caller's privileges (the caller, a superuser, a member of the caller's role) recorded it; others get `note` "skipped: recorded only by …". New last parameter `p_trust_other_roles => true` plans them anyway, with the caller's privileges, and says so in `note`. Planning as the recording role (SET ROLE) was tried and rejected: code in the query can undo it with `set_config('role', …)` or a VOLATILE call that runs `RESET ROLE` (verified on PG 17). When a trusted role recorded the query, its text is the one planned.
+  - **Same-named functions in the caller's search_path ran instead of HypoPG.** HypoPG, pg_stat_statements, pg_stat_index_queries, pg_stat_plans and aurora_stat_plans are now called by the schema of the extension they belong to (new `index_deps.ext_function()` / `ext_relation()`), and `index_drop_impact` resolves its own names in `pg_catalog`; the caller's search_path applies only to the query text being explained, and is restored afterwards.
+  - **Query text with `;`** (possible inside a comment or quoted name, since pg_stat_statements stores one statement per entry) is skipped instead of passed to EXECUTE, where it could run as a second statement. A single trailing `;` is removed first.
+  - `index_drop_impact`'s signature changes (new parameter), so the update drops and recreates it; calls with positional or named arguments keep working. `plan_source` set to a source that isn't installed now raises a clear error. New regression test `security`.
 - Repository made public; README gains contributing / security / support links (homepage databasedeveloper.dev); SECURITY.md describes private reporting and every file and process the extension uses.
 
 ## 0.10 (2026-10-28): native 0.10, SQL edition pg_index_deps 0.7

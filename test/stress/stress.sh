@@ -5,7 +5,8 @@
 #
 # Phases run reads (dynamic SQL in PL/pgSQL: many query IDs, eviction with
 # max = 200), FK cascades, cursors, sampling / flush_interval / EXPLAIN /
-# parallel queries and the views, while a noise loop resets, runs REINDEX
+# parallel queries and the views, while a noise loop resets, runs ALTER
+# COLUMN TYPE (index rebuilds) and REINDEX
 # (CONCURRENTLY), drops and recreates indexes, reloads save_interval, and
 # cancels and terminates backends. Between phases: kill -9 (crash restart),
 # kill -9 of the saver, a corrupt snapshot, fast restarts under load, and a
@@ -139,7 +140,7 @@ noise() {
   local end=$((SECONDS + DUR))
   while [ $SECONDS -lt $end ]; do
     i=$((RANDOM % 40 + 1))
-    case $((RANDOM % 9)) in
+    case $((RANDOM % 11)) in
       0) psql -qXc "SELECT pg_stat_index_queries_reset()" >/dev/null 2>&1 ;;
       1) psql -qXc "REINDEX INDEX CONCURRENTLY t${i}_a" >/dev/null 2>&1 ;;
       2) psql -qXc "REINDEX TABLE CONCURRENTLY t${i}" >/dev/null 2>&1 ;;
@@ -149,6 +150,10 @@ noise() {
       6) psql -qXc "SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() AND random() < 0.2" >/dev/null 2>&1 ;;
       7) psql -qXc "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid() AND random() < 0.05" >/dev/null 2>&1 ;;
       8) psql -qXc "REINDEX INDEX CONCURRENTLY ev_at_idx" >/dev/null 2>&1 ;;
+      # ALTER COLUMN TYPE rebuilds indexes under new OIDs (history carried
+      # over, 0.10.1); on b it races case 3's DROP/CREATE of t_bc.
+      9) psql -qXc "ALTER TABLE t${i} ALTER COLUMN a TYPE $([ $((RANDOM % 2)) = 0 ] && echo bigint || echo int)" >/dev/null 2>&1 ;;
+      10) psql -qXc "ALTER TABLE t${i} ALTER COLUMN b TYPE $([ $((RANDOM % 2)) = 0 ] && echo bigint || echo int)" >/dev/null 2>&1 ;;
     esac
     sleep 0.2
   done
@@ -199,6 +204,8 @@ sleep 1
 run 5 8 $D/read.sql
 psql -qXAtc "SELECT 'entries=' || entries || ' dealloc=' || dealloc FROM pg_stat_index_queries_info"
 psql -qXAtc "SELECT 'used indexes=' || count(*) FILTER (WHERE queries > 0) || ' of ' || count(*) FROM pg_index_usage"
+# Evidence that the ALTER COLUMN TYPE noise ran (its output is discarded).
+psql -qXAtc "SELECT 'bigint columns after ALTER noise=' || count(*) FROM pg_attribute WHERE attname IN ('a', 'b') AND atttypid = 'bigint'::regtype AND attrelid::regclass::text ~ '^t[0-9]+$'"
 echo "crash after a save: counters must survive"
 sleep 3
 before=$(psql -qXAtc "SELECT entries FROM pg_stat_index_queries_info")
@@ -230,7 +237,7 @@ grep -hiE "pg_stat_index_queries" $D/log | sort | uniq -c | sort -rn | head -15
 echo "--- processes that died by a signal:"
 grep -hE "terminated by signal|was terminated|exited with exit code [^01]" $D/log | sed -E 's/^([0-9-]+ [0-9:.]+) UTC \[[0-9]+\] [a-z ]*LOG: +/\1 /' | head -40
 echo "--- statements behind errors other than the induced ones:"
-awk '/ERROR: +(cache lookup failed|could not open relation|unexpected|tuple concurrently)/ {n=4} n > 0 {print; n--}' $D/log | sed -E 's/^[0-9-]+ [0-9:.]+ UTC \[[0-9]+\] //' | cut -c1-300 | head -30
+awk '/ERROR: +(cache lookup failed|could not open relation|unexpected|tuple concurrently|deadlock detected)/ {n=6} n > 0 {print; n--}' $D/log | sed -E 's/^[0-9-]+ [0-9:.]+ UTC \[[0-9]+\] //' | cut -c1-300 | head -30
 echo "--- distinct ERROR/FATAL messages:"
 grep -hE "(ERROR|FATAL):" $D/log | sed -E 's/.*(ERROR|FATAL): +//; s/[0-9]+/N/g' | sort | uniq -c | sort -rn | head -25
 grep -q FINDING $D/summary 2>/dev/null && F=1

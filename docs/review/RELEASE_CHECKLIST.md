@@ -15,24 +15,21 @@ Tick every line before tagging. Record the evidence (command, result, date) next
 
 ## Managed Postgres
 
-- [ ] Aurora PostgreSQL 17: `index_deps.resolved_plan_source()` returns `aurora_stat_plans`; lab run 0 FAIL.
+- [ ] Aurora PostgreSQL 17: `index_deps.resolved_plan_source()` returns `aurora_stat_plans`; lab run 0 FAIL. **Deferred: released without it (noted in the release notes).**
 - [x] RDS PostgreSQL 17, `--simulate-rds` in Docker: 0 FAIL (113 PASS, 2 KNOWN; 29 Oct). A real RDS run is optional.
-- [ ] pg_tle path: `install_pg_tle.sql` on a 0.7 install, then `ALTER EXTENSION pg_index_deps UPDATE` reaches 0.8.
+- [ ] pg_tle path: `install_pg_tle.sql` on a 0.7 install, then `ALTER EXTENSION pg_index_deps UPDATE` reaches 0.8. **Deferred** (no pg_tle in the Docker images; the update script itself is tested through `ALTER EXTENSION`).
 
 ## Performance
 
-- [ ] 0.10.1 vs 0.10, EC2, `--runs 10`: `select_only`, `wide`, `tpcb` within the baseline's intervals (PERFORMANCE_REPORT, item 1).
-- [ ] High-cardinality mode measured and written up (item 2).
-- [ ] 32–128 clients measured (item 3), or explicitly deferred in the release notes.
-- [ ] All EC2 / RDS / Aurora resources deleted afterwards; account shows no instances, clusters, security groups or key pairs from the run.
+- [ ] 0.10.1 vs 0.10, EC2, `--runs 10`, high-cardinality mode, 32–128 clients (PERFORMANCE_REPORT items 1–3). **Deferred: released without them, stated in the release notes.** No EC2 resources were created for this release.
 
 ## Versions and docs
 
 - [x] `default_version` in `pg_stat_index_queries.control` stays `0.10` (library-only release: no SQL objects changed). The library carries no version string, so 0.10.1 is identified by the tag and README/CHANGELOG.
 - [x] `sql_edition/pg_index_deps.control` `default_version = '0.8'`; upgrade script 0.7 → 0.8 present and tested.
-- [ ] CHANGELOG: rename "Unreleased" to `0.10.1 (date): native 0.10.1, SQL edition pg_index_deps 0.8`; keep the "Repository made public" line.
-- [ ] README status line, INSTALL upgrade notes (native 0.10 → 0.10.1: restart only; SQL 0.7 → 0.8), GUIDE, TESTING (new stress and lab rows), BENCHMARK (new results).
-- [ ] `docs/review/` updated with the final evidence.
+- [x] CHANGELOG: "Unreleased" renamed to `0.10.1 (2026-10-29): native 0.10.1, SQL edition pg_index_deps 0.8`.
+- [x] README status line, INSTALL upgrade notes (native 0.10 → 0.10.1: restart only; SQL 0.7 → 0.8), GUIDE, TESTING (stress and lab rows), ROADMAP. BENCHMARK unchanged (no new benchmark).
+- [x] `docs/review/` updated with the final evidence.
 - [ ] No employer, client or production data anywhere (AGENTS rule 10): `git grep` for hostnames, account IDs, customer names.
 
 ## Tag and publish

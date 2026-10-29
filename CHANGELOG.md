@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.1 (2026-10-29): native 0.10.1, SQL edition pg_index_deps 0.8
 - **Native 0.10.1: correctness review fixes** (library only: restart, no `ALTER EXTENSION`). From the 29 Oct 2026 review (PR #1):
   - **New (index, query) pairs are visible at once.** With batching, an idle pooled session could keep a rare query's use out of shared memory indefinitely, so the index looked unused. A pair this backend doesn't know to be in shared memory is now flushed by the statement that recorded it; only counts of known pairs are batched (also after an eviction or reset that races with the check). A reset now also discards other sessions' pending counts from before it (reset epoch).
   - **`first_seen` is the earliest sighting** across sessions, also when the older one is flushed last. Counters saturate at the int64 maximum instead of wrapping.

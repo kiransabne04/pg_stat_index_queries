@@ -34,7 +34,12 @@
 #include "access/parallel.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "catalog/index.h"
+#include "catalog/namespace.h"
+#include "catalog/partition.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_type.h"
+#include "common/int.h"
 #include "common/pg_prng.h"
 #include "executor/executor.h"
 #include "funcapi.h"
@@ -53,6 +58,7 @@
 #include "storage/fd.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/lmgr.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
 #include "storage/spin.h"
@@ -63,6 +69,8 @@
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/ruleutils.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 #include <math.h>
@@ -72,7 +80,7 @@ PG_MODULE_MAGIC;
 
 #define PGSIQ_TRANCHE_NAME		"pg_stat_index_queries"
 #define PGSIQ_DEALLOC_PERCENT	5
-#define PGSIQ_MAX_INDEXES_PER_STMT	64
+#define PGSIQ_SEEN_INLINE	64		/* indexes per statement before growing */
 
 /* Persistence across clean restarts (same approach as pg_stat_statements). */
 #define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
@@ -90,6 +98,17 @@ PG_MODULE_MAGIC;
  * columns above 32 are then not recorded.
  */
 #define PGSIQ_MAX_MASK_COLS	32
+
+/* Counters saturate at the int64 maximum instead of wrapping. */
+static inline int64
+add_sat(int64 a, int64 b)
+{
+	int64		r;
+
+	if (pg_add_s64_overflow(a, b, &r))
+		return PG_INT64_MAX;
+	return r;
+}
 
 /* ---------- shared structures ---------- */
 
@@ -122,8 +141,10 @@ typedef struct pgsiqSharedState
 	TimestampTz stats_reset;
 	bool		sampled;		/* a statement was skipped by sample_rate */
 	bool		dirty;			/* counters changed since the last save */
-	uint64		reset_count;	/* bumped by reset; changed only under
-								 * exclusive lock */
+	pg_atomic_uint64 reset_count;	/* bumped by reset, under the exclusive
+									 * lock */
+	pg_atomic_uint64 change_count;	/* bumped by reset and eviction: entries
+									 * may have disappeared */
 } pgsiqSharedState;
 
 /* Counts of one (index, query) not yet moved to shared memory. */
@@ -136,6 +157,7 @@ typedef struct pgsiqPending
 	TimestampTz last_seen;
 	uint32		cond_cols;
 	uint32		order_cols;
+	uint64		epoch;			/* reset_count when the counts started */
 } pgsiqPending;
 
 /* One index seen in the current statement */
@@ -147,11 +169,20 @@ typedef struct pgsiqSeenIndex
 	uint32		order_cols;
 } pgsiqSeenIndex;
 
+/*
+ * Indexes of one statement. The first PGSIQ_SEEN_INLINE are de-duplicated
+ * as they come; beyond that the array grows (palloc, in the executor's
+ * memory) without per-index search, and is sorted and merged once at the
+ * end, so a statement over many partitions costs O(n log n).
+ */
 typedef struct pgsiqWalkContext
 {
 	int			nseen;
-	bool		overflow;
-	pgsiqSeenIndex seen[PGSIQ_MAX_INDEXES_PER_STMT];
+	int			maxseen;
+	bool		needs_merge;
+	bool		bitmap_ran;		/* the enclosing bitmap heap scan ran */
+	pgsiqSeenIndex *seen;
+	pgsiqSeenIndex inline_seen[PGSIQ_SEEN_INLINE];
 } pgsiqWalkContext;
 
 /* A tracked index as it was before a REINDEX (name and schema). */
@@ -161,6 +192,7 @@ typedef struct pgsiqReindexed
 	Oid			newoid;
 	Oid			nspid;
 	char	   *name;
+	char	   *def;			/* ALTER TABLE: definition before; else NULL */
 } pgsiqReindexed;
 
 /* ---------- GUCs ---------- */
@@ -199,6 +231,17 @@ static HTAB *pending_hash = NULL;
 static TimestampTz last_flush = 0;
 static bool exit_hook_registered = false;
 
+/*
+ * Keys this backend knows are in the shared hash (it put them there, or
+ * saw them), valid while change_count is unchanged. A key not known to be
+ * there is published at once, so the existence of an (index, query) pair
+ * never waits in an idle session's pending table; only counts of known
+ * pairs are batched. Bounded; cleared when full.
+ */
+#define PGSIQ_MAX_KNOWN		2048
+static HTAB *known_hash = NULL;
+static uint64 known_change_count = 0;
+
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
@@ -235,9 +278,13 @@ static void pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								 DestReceiver *dest, QueryCompletion *qc);
 static Size pgsiq_memsize(void);
 static bool pgsiq_walker(PlanState *planstate, void *context);
+static void seen_merge(pgsiqWalkContext *ctx);
 static void pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid,
 							 bool toplevel, int64 weight);
 static void pgsiq_flush(bool force);
+static void known_validate(void);
+static void known_add(const pgsiqHashKey *key);
+static bool known_in_shared(const pgsiqHashKey *key);
 static void pgsiq_backend_exit(int code, Datum arg);
 static void pending_discard(void);
 static void entry_dealloc(void);
@@ -251,8 +298,10 @@ static bool pgsiq_write_file(const char *path, const pgsiqEntry *entries,
 							 TimestampTz stats_reset, bool sampled);
 static void pgsiq_periodic_save(void);
 static inline void mark_dirty(void);
-static pgsiqReindexed *reindex_capture(int *n);
-static void reindex_rekey(pgsiqReindexed *idx, int n);
+static bool alter_rebuilds_indexes(AlterTableStmt *stmt);
+static char *indexdef_nowait(Oid index);
+static pgsiqReindexed *reindex_capture(int *n, Oid table);
+static void reindex_rekey(pgsiqReindexed *idx, int n, Oid table);
 
 PG_FUNCTION_INFO_V1(pg_stat_index_queries);
 PG_FUNCTION_INFO_V1(pg_stat_index_queries_0_8);
@@ -426,7 +475,8 @@ pgsiq_shmem_startup(void)
 		pgsiq->stats_reset = GetCurrentTimestamp();
 		pgsiq->sampled = false;
 		pgsiq->dirty = false;
-		pgsiq->reset_count = 0;
+		pg_atomic_init_u64(&pgsiq->reset_count, 0);
+		pg_atomic_init_u64(&pgsiq->change_count, 0);
 	}
 
 	info.keysize = sizeof(pgsiqHashKey);
@@ -496,19 +546,25 @@ pgsiq_read_file(const char *path)
 
 	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V2 &&
 		 header != PGSIQ_FILE_HEADER_V1) ||
-		pgmajor != PGSIQ_PG_MAJOR || count < 0)
+		pgmajor != PGSIQ_PG_MAJOR || count < 0 || dealloc < 0)
 		goto bad_file;
-	if (header != PGSIQ_FILE_HEADER_V1 &&
-		fread(&sampled, sizeof(bool), 1, file) != 1)
-		goto bad_file;
+	if (header != PGSIQ_FILE_HEADER_V1)
+	{
+		unsigned char b;
+
+		if (fread(&b, 1, 1, file) != 1 || b > 1)
+			goto bad_file;
+		sampled = (b == 1);
+	}
 
 	for (i = 0; i < count; i++)
 	{
 		pgsiqEntry	temp;
 		pgsiqEntry *entry;
+		pgsiqHashKey raw;
 		bool		found;
 
-		if (fread(&temp.key, sizeof(pgsiqHashKey), 1, file) != 1 ||
+		if (fread(&raw, sizeof(pgsiqHashKey), 1, file) != 1 ||
 			fread(&temp.calls_executed, sizeof(int64), 1, file) != 1 ||
 			fread(&temp.calls_planned, sizeof(int64), 1, file) != 1 ||
 			fread(&temp.first_seen, sizeof(TimestampTz), 1, file) != 1 ||
@@ -522,14 +578,37 @@ pgsiq_read_file(const char *path)
 			 fread(&temp.order_cols, sizeof(uint32), 1, file) != 1))
 			goto bad_file;
 
-		/* Never exceed the configured size; drop the remainder. */
+		/*
+		 * Reject counters the writer can't produce (a damaged file): the
+		 * whole file goes, as for a short read. The key is rebuilt so
+		 * padding bytes are zero (keys are compared as raw bytes).
+		 */
+		if (raw.dbid == InvalidOid || raw.indexrelid == InvalidOid ||
+			*((unsigned char *) &raw.toplevel) > 1 ||
+			temp.calls_executed < 0 || temp.calls_planned < 0 ||
+			temp.calls_executed > temp.calls_planned ||
+			temp.first_seen > temp.last_seen)
+			goto bad_file;
+		memset(&temp.key, 0, sizeof(temp.key));
+		temp.key.dbid = raw.dbid;
+		temp.key.indexrelid = raw.indexrelid;
+		temp.key.queryid = raw.queryid;
+		temp.key.toplevel = (*((unsigned char *) &raw.toplevel) == 1);
+
+		/*
+		 * Never exceed the configured size. Records past it are still
+		 * checked field by field above, but not for repeated keys (that
+		 * would need all keys in memory): the duplicate check covers the
+		 * entries that are loaded.
+		 */
 		if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
-			break;
+			continue;
 
 		entry = (pgsiqEntry *) hash_search(pgsiq_hash, &temp.key,
 										   HASH_ENTER, &found);
-		if (!found)
-			SpinLockInit(&entry->mutex);
+		if (found)
+			goto bad_file;		/* the writer never repeats a key */
+		SpinLockInit(&entry->mutex);
 		entry->calls_executed = temp.calls_executed;
 		entry->calls_planned = temp.calls_planned;
 		entry->first_seen = temp.first_seen;
@@ -538,6 +617,10 @@ pgsiq_read_file(const char *path)
 		entry->order_cols = temp.order_cols;
 		entry->cols_complete = temp.cols_complete;
 	}
+
+	/* Nothing may follow the last record. */
+	if (fgetc(file) != EOF)
+		goto bad_file;
 
 	pgsiq->dealloc = dealloc;
 	pgsiq->stats_reset = stats_reset;
@@ -747,7 +830,7 @@ pgsiq_periodic_save(void)
 	stats_reset = pgsiq->stats_reset;
 	sampled = pgsiq->sampled;
 	SpinLockRelease(&pgsiq->mutex);
-	reset_count = pgsiq->reset_count;
+	reset_count = pg_atomic_read_u64(&pgsiq->reset_count);
 	entries = pgsiq_snapshot(&count);
 	LWLockRelease(pgsiq->lock);
 
@@ -755,7 +838,7 @@ pgsiq_periodic_save(void)
 						 stats_reset, sampled))
 	{
 		LWLockAcquire(pgsiq->lock, LW_SHARED);
-		if (pgsiq->reset_count == reset_count)
+		if (pg_atomic_read_u64(&pgsiq->reset_count) == reset_count)
 		{
 			if (rename(PGSIQ_SNAP_FILE ".tmp", PGSIQ_SNAP_FILE) == 0)
 				saved = renamed = true;
@@ -960,10 +1043,24 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 	{
 		pgsiqReindexed *reindexed = NULL;
 		int			nreindexed = 0;
+		Oid			table = InvalidOid;
 
-		/* REINDEX CONCURRENTLY gives indexes new OIDs; carry history over. */
+		/*
+		 * REINDEX CONCURRENTLY and ALTER TABLE ... ALTER COLUMN TYPE give
+		 * indexes new OIDs; carry their history over.
+		 */
 		if (IsA(parsetree, ReindexStmt))
-			reindexed = reindex_capture(&nreindexed);
+			reindexed = reindex_capture(&nreindexed, InvalidOid);
+		else if (IsA(parsetree, AlterTableStmt) && pgsiq &&
+				 alter_rebuilds_indexes((AlterTableStmt *) parsetree))
+		{
+			table = RangeVarGetRelid(((AlterTableStmt *) parsetree)->relation,
+									 NoLock, true);
+
+			if (OidIsValid(table) && get_rel_relkind(table) != RELKIND_INDEX &&
+				get_rel_relkind(table) != RELKIND_PARTITIONED_INDEX)
+				reindexed = reindex_capture(&nreindexed, table);
+		}
 
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
@@ -973,7 +1070,7 @@ pgsiq_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 									params, queryEnv, dest, qc);
 
 		if (reindexed)
-			reindex_rekey(reindexed, nreindexed);
+			reindex_rekey(reindexed, nreindexed, table);
 	}
 	PG_FINALLY();
 	{
@@ -994,13 +1091,100 @@ oid_cmp_reindexed(const void *lhs, const void *rhs)
 }
 
 /*
- * Before a REINDEX: the name and schema of every index tracked in this
- * database, sorted by OID. Allocated in PortalContext when there is one,
- * because REINDEX CONCURRENTLY commits transactions while it runs.
- * Returns NULL when nothing is tracked.
+ * True if an ALTER TABLE rebuilds indexes under new OIDs: ALTER COLUMN TYPE
+ * and (PG 17+) SET EXPRESSION recreate every index on the changed columns
+ * from its own definition. Other subcommands keep index OIDs and skip the
+ * capture. False as well when the statement also adds or drops an index or
+ * constraint, which could leave a different index under a rebuilt one's
+ * name: missing a carry-over is better than giving an index another's
+ * history.
+ */
+static bool
+alter_rebuilds_indexes(AlterTableStmt *stmt)
+{
+	ListCell   *lc;
+	bool		rebuilds = false;
+
+	foreach(lc, stmt->cmds)
+	{
+		AlterTableCmd *cmd = lfirst_node(AlterTableCmd, lc);
+
+		switch (cmd->subtype)
+		{
+			case AT_AlterColumnType:
+#if PG_VERSION_NUM >= 170000
+			case AT_SetExpression:
+#endif
+				rebuilds = true;
+				break;
+			case AT_AddIndex:
+			case AT_AddConstraint:
+			case AT_AddIndexConstraint:
+			case AT_DropConstraint:
+				return false;
+			default:
+				break;
+		}
+	}
+	return rebuilds;
+}
+
+/* True if index is on table, or on a partition (at any depth) of it. */
+static bool
+index_on_table(Oid index, Oid table)
+{
+	Oid			rel = IndexGetRelation(index, true);
+	List	   *ancestors;
+	bool		result;
+
+	if (!OidIsValid(rel))
+		return false;
+	if (rel == table)
+		return true;
+	if (!get_rel_relispartition(rel))
+		return false;
+	ancestors = get_partition_ancestors(rel);
+	result = list_member_oid(ancestors, table);
+	list_free(ancestors);
+	return result;
+}
+
+/*
+ * pg_get_indexdef_string(index), or NULL if the index is gone or another
+ * session holds a lock in the way. pg_get_indexdef_string locks the index's
+ * table; waiting there while holding the index could deadlock with that
+ * session and fail the user's statement. So the table, then the index, are
+ * locked without waiting, as PostgreSQL orders them. Locks this transaction
+ * already holds (an ALTER's own new indexes) are granted at once.
+ */
+static char *
+indexdef_nowait(Oid index)
+{
+	Oid			heap = IndexGetRelation(index, true);
+	char	   *def = NULL;
+
+	if (!OidIsValid(heap) || !ConditionalLockRelationOid(heap, AccessShareLock))
+		return NULL;
+	if (ConditionalLockRelationOid(index, AccessShareLock))
+	{
+		if (SearchSysCacheExists1(RELOID, ObjectIdGetDatum(index)) &&
+			IndexGetRelation(index, true) == heap)
+			def = pg_get_indexdef_string(index);
+		UnlockRelationOid(index, AccessShareLock);
+	}
+	UnlockRelationOid(heap, AccessShareLock);
+	return def;
+}
+
+/*
+ * Before a REINDEX or ALTER TABLE: the name and schema of every index
+ * tracked in this database (for ALTER TABLE: only the indexes of that table
+ * and its partitions, with their definitions), sorted by OID. Allocated in
+ * PortalContext when there is one, because REINDEX CONCURRENTLY commits
+ * transactions while it runs. Returns NULL when nothing is tracked.
  */
 static pgsiqReindexed *
-reindex_capture(int *n)
+reindex_capture(int *n, Oid table)
 {
 	MemoryContext old;
 	HASH_SEQ_STATUS hash_seq;
@@ -1009,6 +1193,7 @@ reindex_capture(int *n)
 	int			nall;
 	int			i;
 	int			j;
+	Oid			prev = InvalidOid;
 
 	*n = 0;
 	if (!pgsiq || !pgsiq_hash)
@@ -1035,19 +1220,54 @@ reindex_capture(int *n)
 	j = 0;
 	for (i = 0; i < nall; i++)
 	{
+		Oid			oid = idx[i].oldoid;
 		char	   *name;
+		char	   *def = NULL;
+		Oid			nspid = InvalidOid;
 
-		if (j > 0 && idx[j - 1].oldoid == idx[i].oldoid)
+		if (oid == prev)
 			continue;
-		name = get_rel_name(idx[i].oldoid);
-		if (name == NULL)
-			continue;
-		idx[j].oldoid = idx[i].oldoid;
+		prev = oid;
+
+		if (OidIsValid(table))
+		{
+			/*
+			 * ALTER TABLE has not locked anything yet. index_on_table only
+			 * uses lookups that return nothing for a dropped index;
+			 * indexdef_nowait never waits. An index that is busy or gone
+			 * keeps no history, and the ALTER never waits or fails here.
+			 */
+			if (!index_on_table(oid, table))
+				continue;
+			def = indexdef_nowait(oid);
+			if (def == NULL)
+				continue;
+			name = get_rel_name(oid);
+			if (name == NULL)
+			{
+				pfree(def);
+				continue;
+			}
+			nspid = get_rel_namespace(oid);
+		}
+		else
+		{
+			name = get_rel_name(oid);
+			if (name == NULL)
+				continue;
+			nspid = get_rel_namespace(oid);
+		}
+		idx[j].oldoid = oid;
 		idx[j].newoid = InvalidOid;
-		idx[j].nspid = get_rel_namespace(idx[i].oldoid);
+		idx[j].nspid = nspid;
 		idx[j].name = name;
+		idx[j].def = def;
 		j++;
 	}
+
+	if (OidIsValid(table))
+		elog(DEBUG1, "pg_stat_index_queries: ALTER TABLE may rebuild %d tracked indexes of relation %u",
+			 j, table);
 
 	MemoryContextSwitchTo(old);
 
@@ -1061,14 +1281,18 @@ reindex_capture(int *n)
 }
 
 /*
- * After a REINDEX: an index whose old OID is gone and whose name now
- * belongs to a different OID was rebuilt concurrently. Move its entries to
- * the new OID, merging with any the new index already has. Other sessions'
- * not yet flushed counts still arrive under the old OID, which the views
- * ignore.
+ * After a REINDEX or ALTER TABLE: an index whose old OID is gone and whose
+ * name now belongs to a different OID was rebuilt (REINDEX CONCURRENTLY;
+ * ALTER TABLE ... ALTER COLUMN TYPE rebuilds a table's indexes). For ALTER
+ * TABLE (table valid) the new index must also be on the same table and have
+ * the same definition: PostgreSQL rebuilds it by running the old index's
+ * pg_get_indexdef_string, so anything else is a different index and keeps
+ * no history. Move its entries to the new OID, merging with any the new
+ * index already has. Other sessions' not yet flushed counts still arrive
+ * under the old OID, which the views ignore.
  */
 static void
-reindex_rekey(pgsiqReindexed *idx, int n)
+reindex_rekey(pgsiqReindexed *idx, int n, Oid table)
 {
 	HASH_SEQ_STATUS hash_seq;
 	pgsiqEntry *entry;
@@ -1082,10 +1306,32 @@ reindex_rekey(pgsiqReindexed *idx, int n)
 		Oid			newoid = get_relname_relid(idx[i].name, idx[i].nspid);
 		char	   *oldname = get_rel_name(idx[i].oldoid);
 
-		if (oldname == NULL && OidIsValid(newoid) && newoid != idx[i].oldoid)
+		if (oldname == NULL && OidIsValid(newoid) && newoid != idx[i].oldoid &&
+			(get_rel_relkind(newoid) == RELKIND_INDEX ||
+			 get_rel_relkind(newoid) == RELKIND_PARTITIONED_INDEX))
 		{
-			idx[i].newoid = newoid;
-			nchanged++;
+			bool		same = (idx[i].def == NULL);
+
+			/*
+			 * The name may now belong to another session's index on another
+			 * table, which nothing stops from being dropped while it is read:
+			 * check the table first, then read without waiting.
+			 */
+			if (!same && index_on_table(newoid, table))
+			{
+				char	   *newdef = indexdef_nowait(newoid);
+
+				if (newdef)
+				{
+					same = (strcmp(idx[i].def, newdef) == 0);
+					pfree(newdef);
+				}
+			}
+			if (same)
+			{
+				idx[i].newoid = newoid;
+				nchanged++;
+			}
 		}
 		if (oldname)
 			pfree(oldname);
@@ -1138,8 +1384,8 @@ reindex_rekey(pgsiqReindexed *idx, int n)
 				entry->cols_complete = m->cols_complete;
 				continue;
 			}
-			entry->calls_executed += m->calls_executed;
-			entry->calls_planned += m->calls_planned;
+			entry->calls_executed = add_sat(entry->calls_executed, m->calls_executed);
+			entry->calls_planned = add_sat(entry->calls_planned, m->calls_planned);
 			if (m->first_seen < entry->first_seen)
 				entry->first_seen = m->first_seen;
 			if (m->last_seen > entry->last_seen)
@@ -1156,7 +1402,11 @@ reindex_rekey(pgsiqReindexed *idx, int n)
 	}
 
 	for (i = 0; i < n; i++)
+	{
 		pfree(idx[i].name);
+		if (idx[i].def)
+			pfree(idx[i].def);
+	}
 	pfree(idx);
 }
 
@@ -1193,6 +1443,37 @@ index_cols(List *exprs)
 	return mask;
 }
 
+static int
+seen_cmp(const void *lhs, const void *rhs)
+{
+	Oid			l = ((const pgsiqSeenIndex *) lhs)->indexrelid;
+	Oid			r = ((const pgsiqSeenIndex *) rhs)->indexrelid;
+
+	return (l < r) ? -1 : (l > r) ? 1 : 0;
+}
+
+/* Sort and merge duplicates once the statement had many indexes. */
+static void
+seen_merge(pgsiqWalkContext *ctx)
+{
+	int			i;
+	int			j = 0;
+
+	qsort(ctx->seen, ctx->nseen, sizeof(pgsiqSeenIndex), seen_cmp);
+	for (i = 1; i < ctx->nseen; i++)
+	{
+		if (ctx->seen[i].indexrelid == ctx->seen[j].indexrelid)
+		{
+			ctx->seen[j].executed |= ctx->seen[i].executed;
+			ctx->seen[j].cond_cols |= ctx->seen[i].cond_cols;
+			ctx->seen[j].order_cols |= ctx->seen[i].order_cols;
+		}
+		else
+			ctx->seen[++j] = ctx->seen[i];
+	}
+	ctx->nseen = j + 1;
+}
+
 /* Column masks are only collected for scans that ran. */
 static void
 remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed,
@@ -1211,7 +1492,7 @@ remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed,
 		order_cols = index_cols(indexorderby);
 	}
 
-	for (i = 0; i < ctx->nseen; i++)
+	for (i = 0; i < Min(ctx->nseen, PGSIQ_SEEN_INLINE); i++)
 	{
 		if (ctx->seen[i].indexrelid == indexrelid)
 		{
@@ -1222,10 +1503,18 @@ remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed,
 		}
 	}
 
-	if (ctx->nseen >= PGSIQ_MAX_INDEXES_PER_STMT)
+	if (ctx->nseen >= PGSIQ_SEEN_INLINE)
+		ctx->needs_merge = true;
+	if (ctx->nseen >= ctx->maxseen)
 	{
-		ctx->overflow = true;
-		return;
+		pgsiqSeenIndex *bigger;
+
+		bigger = palloc(sizeof(pgsiqSeenIndex) * ctx->maxseen * 2);
+		memcpy(bigger, ctx->seen, sizeof(pgsiqSeenIndex) * ctx->nseen);
+		if (ctx->seen != ctx->inline_seen)
+			pfree(ctx->seen);
+		ctx->seen = bigger;
+		ctx->maxseen *= 2;
 	}
 
 	ctx->seen[ctx->nseen].indexrelid = indexrelid;
@@ -1264,16 +1553,36 @@ pgsiq_walker(PlanState *planstate, void *context)
 							   plan->indexqual, plan->indexorderby);
 				break;
 			}
-		case T_BitmapIndexScanState:
+		case T_BitmapHeapScanState:
 			{
 				/*
-				 * The scan descriptor is created at executor init, so we
-				 * cannot tell whether it actually ran. Counted as executed;
-				 * documented as approximate.
+				 * A bitmap index scan builds its scan state at executor init,
+				 * so it can't say whether it ran; its bitmap heap scan can. From
+				 * PG 17 the heap scan opens its table scan on the first fetch
+				 * and keeps it across rescans, so a scan descriptor means the
+				 * bitmap was built. A parallel-aware scan may have run only in
+				 * workers (the leader's state says nothing), and PG 15/16 open
+				 * the scan at init: both count as run, as before.
 				 */
+				bool		save = ctx->bitmap_ran;
+				bool		result;
+
+#if PG_VERSION_NUM >= 170000
+				ctx->bitmap_ran = planstate->plan->parallel_aware ||
+					((ScanState *) planstate)->ss_currentScanDesc != NULL;
+#else
+				ctx->bitmap_ran = true;
+#endif
+				result = planstate_tree_walker(planstate, pgsiq_walker, context);
+				ctx->bitmap_ran = save;
+				return result;
+			}
+		case T_BitmapIndexScanState:
+			{
 				BitmapIndexScan *plan = (BitmapIndexScan *) planstate->plan;
 
-				remember_index(ctx, plan->indexid, true, plan->indexqual, NIL);
+				remember_index(ctx, plan->indexid, ctx->bitmap_ran,
+							   plan->indexqual, NIL);
 				break;
 			}
 		default:
@@ -1293,7 +1602,12 @@ pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
 				 int64 weight)
 {
 	TimestampTz now = GetCurrentStatementStartTimestamp();
+	uint64		epoch = pg_atomic_read_u64(&pgsiq->reset_count);
+	bool		publish = false;
+	bool		trusted_known = false;
 	int			i;
+
+	known_validate();
 
 	if (pending_hash == NULL)
 	{
@@ -1326,23 +1640,38 @@ pgsiq_accumulate(pgsiqWalkContext *ctx, uint64 queryid, bool toplevel,
 		key.toplevel = toplevel;
 
 		p = (pgsiqPending *) hash_search(pending_hash, &key, HASH_ENTER, &found);
-		if (!found)
+		/* New since the last flush, or counted before a reset: start over. */
+		if (!found || p->epoch != epoch)
 		{
 			p->calls_executed = 0;
 			p->calls_planned = 0;
 			p->first_seen = now;
 			p->cond_cols = 0;
 			p->order_cols = 0;
+			p->epoch = epoch;
+			if (!known_in_shared(&key))
+				publish = true;
+			else
+				trusted_known = true;
 		}
-		p->calls_planned += weight;
+		p->calls_planned = add_sat(p->calls_planned, weight);
 		if (ctx->seen[i].executed)
-			p->calls_executed += weight;
+			p->calls_executed = add_sat(p->calls_executed, weight);
 		p->last_seen = now;
 		p->cond_cols |= ctx->seen[i].cond_cols;
 		p->order_cols |= ctx->seen[i].order_cols;
 	}
 
-	if (pgsiq_flush_interval == 0 ||
+	/*
+	 * A reset or eviction after known_validate() may have removed a pair
+	 * trusted above as known; publish then. One that happens after this
+	 * check is an ordinary eviction (the counts arrive with the next flush).
+	 */
+	if (trusted_known &&
+		pg_atomic_read_u64(&pgsiq->change_count) != known_change_count)
+		publish = true;
+
+	if (publish || pgsiq_flush_interval == 0 ||
 		hash_get_num_entries(pending_hash) >= PGSIQ_MAX_PENDING)
 		pgsiq_flush(true);
 	else if (TimestampDifferenceExceeds(last_flush, now, pgsiq_flush_interval))
@@ -1361,6 +1690,60 @@ mark_dirty(void)
 	}
 }
 
+/* Forget the known keys if shared entries may have been reset or evicted. */
+static void
+known_validate(void)
+{
+	uint64		cc = pg_atomic_read_u64(&pgsiq->change_count);
+
+	if (known_hash != NULL && cc != known_change_count)
+	{
+		hash_destroy(known_hash);
+		known_hash = NULL;
+	}
+	known_change_count = cc;
+}
+
+static void
+known_add(const pgsiqHashKey *key)
+{
+	if (known_hash == NULL || hash_get_num_entries(known_hash) >= PGSIQ_MAX_KNOWN)
+	{
+		HASHCTL		info;
+
+		if (known_hash != NULL)
+			hash_destroy(known_hash);
+		info.keysize = sizeof(pgsiqHashKey);
+		info.entrysize = sizeof(pgsiqHashKey);
+		info.hcxt = TopMemoryContext;
+		known_hash = hash_create("pg_stat_index_queries known", 256, &info,
+								 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+	(void) hash_search(known_hash, key, HASH_ENTER, NULL);
+}
+
+/*
+ * True if key is known to be in the shared hash. A key not in the local
+ * set is looked up once (without waiting for the lock: if it is busy, the
+ * key counts as unknown and is published).
+ */
+static bool
+known_in_shared(const pgsiqHashKey *key)
+{
+	bool		found = false;
+
+	if (known_hash != NULL && hash_search(known_hash, key, HASH_FIND, NULL) != NULL)
+		return true;
+	if (LWLockConditionalAcquire(pgsiq->lock, LW_SHARED))
+	{
+		found = (hash_search(pgsiq_hash, key, HASH_FIND, NULL) != NULL);
+		LWLockRelease(pgsiq->lock);
+	}
+	if (found)
+		known_add(key);
+	return found;
+}
+
 /*
  * Move pending counts into the shared hash. force = false gives up if the
  * lock is busy (the counts stay pending and are retried later); force =
@@ -1373,6 +1756,7 @@ pgsiq_flush(bool force)
 	HASH_SEQ_STATUS hash_seq;
 	pgsiqPending *p;
 	bool		need_insert = false;
+	uint64		epoch;
 
 	if (pending_hash == NULL || pgsiq == NULL || pgsiq_hash == NULL ||
 		hash_get_num_entries(pending_hash) == 0)
@@ -1383,10 +1767,21 @@ pgsiq_flush(bool force)
 	else if (!LWLockConditionalAcquire(pgsiq->lock, LW_SHARED))
 		return;
 
+	/* A reset bumps this under the exclusive lock, so it can't move now. */
+	epoch = pg_atomic_read_u64(&pgsiq->reset_count);
+
 	hash_seq_init(&hash_seq, pending_hash);
 	while ((p = hash_seq_search(&hash_seq)) != NULL)
 	{
 		pgsiqEntry *entry;
+		pgsiqHashKey key;
+
+		/* Counted before a reset: belongs to the old epoch, drop it. */
+		if (p->epoch != epoch)
+		{
+			hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+			continue;
+		}
 
 		entry = (pgsiqEntry *) hash_search(pgsiq_hash, &p->key, HASH_FIND, NULL);
 		if (!entry)
@@ -1395,15 +1790,19 @@ pgsiq_flush(bool force)
 			continue;
 		}
 		SpinLockAcquire(&entry->mutex);
-		entry->calls_executed += p->calls_executed;
-		entry->calls_planned += p->calls_planned;
+		entry->calls_executed = add_sat(entry->calls_executed, p->calls_executed);
+		entry->calls_planned = add_sat(entry->calls_planned, p->calls_planned);
+		if (p->first_seen < entry->first_seen)
+			entry->first_seen = p->first_seen;
 		if (p->last_seen > entry->last_seen)
 			entry->last_seen = p->last_seen;
 		entry->cond_cols |= p->cond_cols;
 		entry->order_cols |= p->order_cols;
 		SpinLockRelease(&entry->mutex);
 		/* Removing the element just returned is allowed during a scan. */
+		key = p->key;
 		hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+		known_add(&key);
 	}
 	LWLockRelease(pgsiq->lock);
 	mark_dirty();
@@ -1415,11 +1814,19 @@ pgsiq_flush(bool force)
 		else if (!LWLockConditionalAcquire(pgsiq->lock, LW_EXCLUSIVE))
 			return;
 
+		epoch = pg_atomic_read_u64(&pgsiq->reset_count);
 		hash_seq_init(&hash_seq, pending_hash);
 		while ((p = hash_seq_search(&hash_seq)) != NULL)
 		{
 			pgsiqEntry *entry;
+			pgsiqHashKey key;
 			bool		found;
+
+			if (p->epoch != epoch)
+			{
+				hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+				continue;
+			}
 
 			if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
 				entry_dealloc();
@@ -1438,13 +1845,17 @@ pgsiq_flush(bool force)
 				entry->cols_complete = true;
 			}
 			/* Exclusive lock held: no spinlock needed. */
-			entry->calls_executed += p->calls_executed;
-			entry->calls_planned += p->calls_planned;
+			entry->calls_executed = add_sat(entry->calls_executed, p->calls_executed);
+			entry->calls_planned = add_sat(entry->calls_planned, p->calls_planned);
+			if (p->first_seen < entry->first_seen)
+				entry->first_seen = p->first_seen;
 			if (p->last_seen > entry->last_seen)
 				entry->last_seen = p->last_seen;
 			entry->cond_cols |= p->cond_cols;
 			entry->order_cols |= p->order_cols;
+			key = p->key;
 			hash_search(pending_hash, &p->key, HASH_REMOVE, NULL);
+			known_add(&key);
 		}
 		LWLockRelease(pgsiq->lock);
 		mark_dirty();
@@ -1512,10 +1923,15 @@ pgsiq_ExecutorEnd(QueryDesc *queryDesc)
 			pgsiqWalkContext ctx;
 
 			ctx.nseen = 0;
-			ctx.overflow = false;
+			ctx.maxseen = PGSIQ_SEEN_INLINE;
+			ctx.needs_merge = false;
+			ctx.bitmap_ran = true;
+			ctx.seen = ctx.inline_seen;
 
 			/* planstate_tree_walker() skips the root node; visit it ourselves. */
 			pgsiq_walker(queryDesc->planstate, &ctx);
+			if (ctx.needs_merge)
+				seen_merge(&ctx);
 
 			if (ctx.nseen > 0)
 				pgsiq_accumulate(&ctx, queryid, nesting_level == 0, weight);
@@ -1575,6 +1991,7 @@ entry_dealloc(void)
 	SpinLockAcquire(&pgsiq->mutex);
 	pgsiq->dealloc++;
 	SpinLockRelease(&pgsiq->mutex);
+	pg_atomic_fetch_add_u64(&pgsiq->change_count, 1);
 }
 
 /* ---------- SQL-callable functions ---------- */
@@ -1624,8 +2041,9 @@ static void
 pg_stat_index_queries_internal(FunctionCallInfo fcinfo, pgsiqVersion api)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	HASH_SEQ_STATUS hash_seq;
-	pgsiqEntry *entry;
+	pgsiqEntry *entries;
+	int64		count;
+	int64		n;
 
 	check_loaded();
 
@@ -1634,47 +2052,37 @@ pg_stat_index_queries_internal(FunctionCallInfo fcinfo, pgsiqVersion api)
 
 	InitMaterializedSRF(fcinfo, 0);
 
+	/*
+	 * Copy under the shared lock and build the result after releasing it:
+	 * array and tuplestore work (which can spill to disk) must not hold up
+	 * backends waiting to insert or to flush on exit.
+	 */
 	LWLockAcquire(pgsiq->lock, LW_SHARED);
+	entries = pgsiq_snapshot(&count);
+	LWLockRelease(pgsiq->lock);
 
-	hash_seq_init(&hash_seq, pgsiq_hash);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
+	for (n = 0; n < count; n++)
 	{
+		const pgsiqEntry *entry = &entries[n];
 		Datum		values[PG_STAT_INDEX_QUERIES_COLS];
 		bool		nulls[PG_STAT_INDEX_QUERIES_COLS];
-		int64		calls_executed;
-		int64		calls_planned;
-		TimestampTz first_seen;
-		TimestampTz last_seen;
-		uint32		cond_cols;
-		uint32		order_cols;
-		bool		cols_complete;
 		int			i = 0;
 
 		memset(nulls, 0, sizeof(nulls));
-
-		SpinLockAcquire(&entry->mutex);
-		calls_executed = entry->calls_executed;
-		calls_planned = entry->calls_planned;
-		first_seen = entry->first_seen;
-		last_seen = entry->last_seen;
-		cond_cols = entry->cond_cols;
-		order_cols = entry->order_cols;
-		cols_complete = entry->cols_complete;
-		SpinLockRelease(&entry->mutex);
 
 		values[i++] = ObjectIdGetDatum(entry->key.dbid);
 		values[i++] = ObjectIdGetDatum(entry->key.indexrelid);
 		values[i++] = Int64GetDatumFast((int64) entry->key.queryid);
 		values[i++] = BoolGetDatum(entry->key.toplevel);
-		values[i++] = Int64GetDatumFast(calls_executed);
-		values[i++] = Int64GetDatumFast(calls_planned);
-		values[i++] = TimestampTzGetDatum(first_seen);
-		values[i++] = TimestampTzGetDatum(last_seen);
+		values[i++] = Int64GetDatumFast(entry->calls_executed);
+		values[i++] = Int64GetDatumFast(entry->calls_planned);
+		values[i++] = TimestampTzGetDatum(entry->first_seen);
+		values[i++] = TimestampTzGetDatum(entry->last_seen);
 		if (api >= PGSIQ_V0_8)
 		{
-			values[i++] = cols_to_array(cond_cols);
-			values[i++] = cols_to_array(order_cols);
-			values[i++] = BoolGetDatum(cols_complete);
+			values[i++] = cols_to_array(entry->cond_cols);
+			values[i++] = cols_to_array(entry->order_cols);
+			values[i++] = BoolGetDatum(entry->cols_complete);
 		}
 
 		Assert(i == (api == PGSIQ_V0_1 ? PG_STAT_INDEX_QUERIES_COLS_V0_1 :
@@ -1684,7 +2092,7 @@ pg_stat_index_queries_internal(FunctionCallInfo fcinfo, pgsiqVersion api)
 							 values, nulls);
 	}
 
-	LWLockRelease(pgsiq->lock);
+	pfree(entries);
 }
 
 Datum
@@ -1710,8 +2118,8 @@ pg_stat_index_queries_reset(PG_FUNCTION_ARGS)
 	check_loaded();
 
 	/*
-	 * Drops this backend's pending counts too. Other backends' pending
-	 * counts (at most flush_interval old) still arrive after the reset.
+	 * Discard this backend's pending counts. Other backends discard
+	 * pending entries from an earlier reset epoch when they next flush.
 	 */
 	pending_discard();
 
@@ -1729,7 +2137,8 @@ pg_stat_index_queries_reset(PG_FUNCTION_ARGS)
 	SpinLockRelease(&pgsiq->mutex);
 
 	/* A crash after a reset must not bring back the old counters. */
-	pgsiq->reset_count++;
+	pg_atomic_fetch_add_u64(&pgsiq->reset_count, 1);
+	pg_atomic_fetch_add_u64(&pgsiq->change_count, 1);
 	unlink(PGSIQ_SNAP_FILE);
 	unlink(PGSIQ_DUMP_FILE);
 

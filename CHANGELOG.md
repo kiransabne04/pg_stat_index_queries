@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- **Native 0.10.1: correctness review fixes** (library only: restart, no `ALTER EXTENSION`). From the 29 Oct 2026 review (PR #1):
+  - **New (index, query) pairs are visible at once.** With batching, an idle pooled session could keep a rare query's use out of shared memory indefinitely, so the index looked unused. A pair this backend doesn't know to be in shared memory is now flushed by the statement that recorded it; only counts of known pairs are batched (also after an eviction or reset that races with the check). A reset now also discards other sessions' pending counts from before it (reset epoch).
+  - **`first_seen` is the earliest sighting** across sessions, also when the older one is flushed last. Counters saturate at the int64 maximum instead of wrapping.
+  - **Stats file loading is stricter:** a file with invalid OIDs, a toplevel byte other than 0/1, negative counts, executed > planned, first_seen > last_seen, repeated keys (among loaded entries) or trailing bytes is ignored as a whole (LOG "ignoring invalid … file").
+  - **No 64-index cap per statement**; on PG 17+ a bitmap scan that never ran (one-time filter false) counts as planned, not executed.
+  - **ALTER TABLE … ALTER COLUMN TYPE / SET EXPRESSION (PG 17+) keep index history**, like REINDEX CONCURRENTLY: the rebuilt indexes (new OIDs) get their counts when they are on the same table and print the same definition. Skipped on purpose, leaving the rebuilt index with no recorded use from before the ALTER: when the statement also adds or drops an index or constraint, when another session holds the table or index locked at that moment (the capture never waits, so it can't deadlock or fail the ALTER), or when the definition prints differently (some expression indexes). Other ALTER TABLE subcommands don't run the capture. Cost: about 0.1 ms per 1,000 tracked entries per such ALTER (2 ms at the default `max`, 12 ms at 100k; PG 17, laptop).
+  - **The views no longer hold the shared lock while building their result**, so slow readers don't hold up backends inserting or flushing.
+  - New regression test `review`; new TAP test `006_review`; `002_eviction` gains eviction-race and out-of-order `first_seen` cases.
 - Repository made public; README gains contributing / security / support links (homepage databasedeveloper.dev); SECURITY.md describes private reporting and every file and process the extension uses.
 
 ## 0.10 (2026-10-28): native 0.10, SQL edition pg_index_deps 0.7

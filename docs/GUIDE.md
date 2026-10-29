@@ -132,6 +132,8 @@ SELECT queryid, calls, cost_with, cost_without, cost_ratio, plan_changed, note, 
 
 It hides the index **for your session only** (HypoPG), re-plans each dependent query with `EXPLAIN (GENERIC_PLAN)` and compares the costs. It never executes a query and never drops anything. It works in read-only transactions, including Aurora readers. `p_timeout_ms` limits the whole call.
 
+Planning a query runs IMMUTABLE functions in it that have constant arguments, with your privileges. So queries recorded only by roles that don't have your privileges (typically the application's role when you run this as a superuser) are skipped, and `note` names the role (0.8). To check them, connect as that role and run it again, or pass `p_trust_other_roles => true` if you trust every role that ran them.
+
 ### 5. Is this composite index wider than it needs to be? (0.8)
 
 ```sql

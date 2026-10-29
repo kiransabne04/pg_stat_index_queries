@@ -71,7 +71,7 @@ SELECT note FROM index_deps.index_drop_impact('o_c_idx') WHERE query LIKE 'UPDAT
 -- Errors
 SELECT index_deps.index_drop_impact('o'::regclass);
 ERROR:  o is not an index
-CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer) line 40 at RAISE
+CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer,boolean) line 53 at RAISE
 -- Query text EXPLAIN can't take as is: typed literals and PREPARE.
 SELECT q AS input, index_deps.explainable_query(q) AS explained
   FROM unnest(ARRAY[

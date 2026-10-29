@@ -47,6 +47,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **SQL edition 0.6 → 0.7:** `ALTER EXTENSION pg_index_deps UPDATE TO '0.7';` (or rerun `install_pg_tle.sql`, then `ALTER EXTENSION pg_index_deps UPDATE`). Same foreign-key change in `index_deps.index_role`.
 
+**SQL edition 0.7 → 0.8:** `ALTER EXTENSION pg_index_deps UPDATE TO '0.8';` (or rerun `install_pg_tle.sql`, then `ALTER EXTENSION pg_index_deps UPDATE`). Security fixes in `index_drop_impact`: queries recorded only by roles without your privileges are now skipped (`note` says which role; pass `p_trust_other_roles => true` to plan them anyway, or run the check connected as that role), and HypoPG / pg_stat_statements are found through their extension, not your search_path. The function is dropped and recreated with a new last parameter; your own objects that depend on it must be dropped first.
+
 **Upgrading 0.6 → 0.7:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.7';` (adds `pg_index_table_stats`, `pg_index_column_stats` and `pg_index_hints()`; `pg_index_usage` gains a last column `hints`). SQL only, no restart.
 
 **Upgrading 0.4 → 0.5:** `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.5';` (adds `pg_index_role()` and `pg_index_usage`; `pg_index_dependents` gains `index_role`; `pg_index_query_stats` gains `index_role` and `index_notes` after `is_partial`, so `SELECT *` column positions change). SQL only, no restart.

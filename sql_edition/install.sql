@@ -1,7 +1,7 @@
--- pg_index_deps 0.8, plain install (generated, do not edit)
+-- pg_index_deps 0.9, plain install (generated, do not edit)
 CREATE SCHEMA IF NOT EXISTS index_deps;
 SET search_path = index_deps, public;
-/* pg_index_deps--0.8.sql
+/* pg_index_deps--0.9.sql
  *
  * SQL edition of pg_stat_index_queries. No C code, so it installs on managed
  * Postgres (Amazon Aurora, RDS) as well as self-hosted servers.
@@ -48,31 +48,38 @@ GRANT SELECT ON index_deps.config TO PUBLIC;
 
 -- Schema-qualified name of function p_name(p_args) that belongs to
 -- extension p_ext, or NULL. p_ext NULL: a function in pg_catalog or in any
--- extension (aurora_stat_plans is built into Aurora). Other extensions'
--- objects are called by this name, never through the caller's search_path,
--- so a same-named function in a schema earlier in it never runs. One the
--- caller may not use (no USAGE on its schema, no EXECUTE) counts as absent.
+-- extension. pg_catalog is checked by resolving the qualified name, not by
+-- reading pg_proc: Aurora hides its built-in functions (aurora_stat_plans,
+-- OID 9888 on 17.11) from pg_proc queries. Other extensions' objects are
+-- called by this name, never through the caller's search_path, so a
+-- same-named function in a schema earlier in it never runs. One the caller
+-- may not use (no USAGE on its schema, no EXECUTE) counts as absent.
 CREATE FUNCTION index_deps.ext_function(p_ext name, p_name name, p_args regtype[])
 RETURNS text
 LANGUAGE sql STABLE
 SET search_path = pg_catalog, pg_temp
 AS $$
-    SELECT format('%I.%I', n.nspname, p.proname)
-      FROM pg_proc p
-      JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE p.proname = p_name
-       AND p.proargtypes = array_to_string(p_args::oid[], ' ')::oidvector
-       AND has_schema_privilege(n.oid, 'USAGE')
-       AND has_function_privilege(p.oid, 'EXECUTE')
-       AND (EXISTS (SELECT 1
-                      FROM pg_depend d
-                      JOIN pg_extension e ON e.oid = d.refobjid
-                     WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid
-                       AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
-                       AND (p_ext IS NULL OR e.extname = p_ext))
-            OR (p_ext IS NULL AND n.nspname = 'pg_catalog'))
-     ORDER BY n.nspname <> 'pg_catalog'
-     LIMIT 1
+    SELECT coalesce(
+        (SELECT format('pg_catalog.%I', p_name)
+          WHERE p_ext IS NULL
+            AND has_function_privilege(
+                    to_regprocedure(format('pg_catalog.%I(%s)', p_name, array_to_string(p_args::text[], ', '))),
+                    'EXECUTE')),
+        (SELECT format('%I.%I', n.nspname, p.proname)
+           FROM pg_proc p
+           JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE p.proname = p_name
+            AND p.proargtypes = array_to_string(p_args::oid[], ' ')::oidvector
+            AND has_schema_privilege(n.oid, 'USAGE')
+            AND has_function_privilege(p.oid, 'EXECUTE')
+            AND EXISTS (SELECT 1
+                          FROM pg_depend d
+                          JOIN pg_extension e ON e.oid = d.refobjid
+                         WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                           AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'
+                           AND (p_ext IS NULL OR e.extname = p_ext))
+          ORDER BY n.nspname
+          LIMIT 1))
 $$;
 
 -- Schema-qualified name of relation p_name that belongs to extension

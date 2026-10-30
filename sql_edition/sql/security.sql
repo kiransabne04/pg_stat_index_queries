@@ -75,6 +75,17 @@ SELECT count(*) FROM index_deps.index_drop_impact('public.sec_t_pkey');
 RESET ROLE;
 GRANT EXECUTE ON FUNCTION hypopg_hide_index(oid) TO PUBLIC;
 
+-- 5. With no extension named (aurora_stat_plans is in pg_catalog on
+--    Aurora, hidden from pg_proc queries), pg_catalog is checked by the
+--    qualified name; a same-named function elsewhere is not accepted, even
+--    one owned by a superuser and first in the search_path.
+SELECT index_deps.ext_function(NULL, 'pg_get_indexdef', '{oid}') AS catalog_function;
+CREATE FUNCTION public.siq_probe(boolean) RETURNS int LANGUAGE sql AS 'SELECT 1';
+SET search_path = public;
+SELECT index_deps.ext_function(NULL, 'siq_probe', '{boolean}') IS NULL AS outside_catalog_rejected;
+RESET search_path;
+DROP FUNCTION public.siq_probe(boolean);
+
 DROP TABLE sec_t;
 DROP SCHEMA siq_low CASCADE;
 DROP ROLE siq_low;

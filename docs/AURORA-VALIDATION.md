@@ -11,6 +11,8 @@ The test itself is the index lab ([sql_edition/validation/lab/](../sql_edition/v
 | Docker PG 16, 17, 18: self-hosted path (pg_stat_plans) and simulated RDS path | Lab run 24 Oct 2026; results in [TESTING.md](TESTING.md#index-lab-docker-24-oct-2026) |
 | Aurora PostgreSQL 17.9.5, express configuration (writer only) | Run 24 Oct 2026: 115 PASS, 0 FAIL, 4 KNOWN, pg_tle install. [Report](validation/2026-10-24-aurora-17.9-express-writer.md) |
 | Aurora reader phase (express cluster + `db.serverless` reader) | Run 24 Oct 2026 (second run, writer again 115 PASS / 0 FAIL): W40 attributed on the reader only, `index_drop_impact` runs on the reader without error. [Reader report](validation/2026-10-24-aurora-17.9-express-reader.md). On the free plan the reader only fits when no other DB instance exists (RDS deleted first) |
+| Aurora PostgreSQL 17.11 (db.t4g.medium writer), SQL edition 0.9 | Run 29 Oct 2026: 123 PASS, 0 FAIL, 4 KNOWN, pg_tle install, plan source `aurora_stat_plans` ([report](validation/2026-10-29-aurora-17.11-writer.md)). The first 29 Oct run, with 0.8, found no plan source: Aurora hides `aurora_stat_plans` (OID 9888) from `pg_proc` queries; fixed in 0.9 |
+| RDS for PostgreSQL 17.11, SQL edition 0.9 | Run 29 Oct 2026: 41 PASS, 0 FAIL, 2 KNOWN, plain install ([report](validation/2026-10-29-rds-17.11.md)) |
 | RDS for PostgreSQL 17.11 (db.t4g.micro) | Run 24 Oct 2026: 33 PASS, 0 FAIL, 2 KNOWN, plain install. [Report](validation/2026-10-24-rds-17.11.md) |
 
 What the run taught us:
@@ -18,6 +20,7 @@ What the run taught us:
 - **Free-plan accounts** (the new AWS experience) can create Aurora only with express configuration (`LAB_AURORA_EXPRESS=1`). AWS then picks the engine version (17.9 here), uses Serverless v2 (0–4 capacity units), turns off VPC networking (the cluster is reached over the internet), signs in as `postgres` with IAM tokens instead of a password, and counts every DB instance against a small quota: the reader could be added only once the RDS instance was gone. A custom cluster parameter group can be attached after creation; it takes effect after a reboot.
 - **pg_tle install** needs `GRANT pgtle_admin TO CURRENT_USER;` first. The master user is `rds_superuser` but not `pgtle_admin`.
 - **IAM tokens** last 15 minutes for new connections. `run.sh` takes `PGPASSWORD_CMD` and fetches a fresh token before every connection; the lab's reconnect to the second database happens before the seed.
+- **Aurora hides its built-in functions from `pg_proc`** (29 Oct 2026, Aurora 17.11): `aurora_stat_plans(boolean)` resolves by name and runs, but `SELECT … FROM pg_proc` returns no row for it by OID (9888) or by name, and no `aurora*` rows at all, even for the master user. Find such functions with `to_regprocedure('pg_catalog.name(args)')`, never by reading `pg_proc`.
 - Columns of `aurora_stat_plans(true)` match the adapter; `pg_stat_statements.track = all` can be set per session by the master user.
 
 ## 0. What you need

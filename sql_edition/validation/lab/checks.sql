@@ -39,6 +39,21 @@ ON CONFLICT (k) DO UPDATE SET v = excluded.v;
 \if :is_aurora
 INSERT INTO lab.env VALUES ('aurora_version', aurora_version()) ON CONFLICT (k) DO UPDATE SET v = excluded.v;
 \endif
+-- Aurora hides aurora_stat_plans from pg_proc; it resolves only by name.
+INSERT INTO lab.env VALUES ('aurora_stat_plans via pg_catalog',
+    coalesce('OID ' || to_regprocedure('pg_catalog.aurora_stat_plans(boolean)')::oid, 'not found'))
+ON CONFLICT (k) DO UPDATE SET v = excluded.v;
+-- Where the plan source function lives (schema, owner, superuser owner,
+-- extension) when pg_proc shows it.
+INSERT INTO lab.env (k, v)
+SELECT 'plan source function ' || p.oid::regprocedure::text,
+       format('schema %s, owner %s (superuser %s), extension %s', n.nspname, r.rolname, r.rolsuper,
+              coalesce((SELECT e.extname FROM pg_depend d JOIN pg_extension e ON e.oid = d.refobjid
+                         WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid
+                           AND d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e'), 'none'))
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner
+ WHERE p.proname IN ('aurora_stat_plans', 'pg_stat_plans')
+ON CONFLICT (k) DO UPDATE SET v = excluded.v;
 
 -- Check results go to lab.results; keep the log readable.
 \o /dev/null
@@ -559,6 +574,14 @@ SELECT lab.chk_bool('E-no-pgss-di', 'errors', 'drop_impact without pg_stat_state
 SELECT lab.chk_bool('E-no-pgss-qs', 'errors', 'index_query_stats without pg_stat_statements: clear error', 'low',
                     m LIKE 'error:%needs pg_stat_statements%', 'error: index_query_stats needs pg_stat_statements', m)
   FROM lab.try($$SELECT count(*) FROM index_deps.index_query_stats$$, 'DROP EXTENSION pg_stat_statements') m;
+-- With plan_source = auto, the source found must be the one this server has
+-- (a lookup that misses it leaves every dependents view empty).
+SELECT lab.chk_bool('ENV-plan-source', 'errors', 'plan_source = auto finds the plan source this server has', 'critical',
+                    index_deps.resolved_plan_source() = x.expected, x.expected, index_deps.resolved_plan_source())
+  FROM (SELECT CASE WHEN to_regprocedure('aurora_stat_plans(boolean)') IS NOT NULL THEN 'aurora_stat_plans'
+                    WHEN to_regprocedure('pg_stat_plans(boolean)') IS NOT NULL THEN 'pg_stat_plans'
+                    ELSE 'none' END AS expected) x
+ WHERE (SELECT value FROM index_deps.config WHERE key = 'plan_source') = 'auto';
 SELECT lab.chk_bool('E-bad-source', 'errors', 'plan_source set to a missing table: clear error', 'low',
                     m LIKE 'error:%does not exist%', 'error: relation ... does not exist', m)
   FROM lab.try($$SELECT count(*) FROM index_deps.index_dependents$$,

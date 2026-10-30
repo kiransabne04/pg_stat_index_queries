@@ -6,6 +6,7 @@
 #                          # reader) and an RDS instance; waits until available
 #   lab-aws.sh run         # run the lab: Aurora writer (pg_tle install), Aurora
 #                          # reader phase, RDS (plain install); reports in lab-out/
+#   lab-aws.sh psql [cluster|rds] [psql args]  # psql to the writer (debugging)
 #   lab-aws.sh status      # what exists now
 #   lab-aws.sh down        # delete everything this script created (no snapshots)
 #
@@ -223,10 +224,13 @@ run() {
   ls -1 "$out"/*-"$stamp"/*.md
 }
 
+# What exists now. Fails (non-zero) when AWS can't be asked: an API error
+# must never read as "nothing left".
 status() {
-  aws_ rds describe-db-clusters --query "DBClusters[?starts_with(DBClusterIdentifier,'$P')].[DBClusterIdentifier,EngineVersion,Status]" 2>/dev/null || true
-  aws_ rds describe-db-instances --query "DBInstances[?starts_with(DBInstanceIdentifier,'$P')].[DBInstanceIdentifier,DBInstanceClass,EngineVersion,DBInstanceStatus]" 2>/dev/null || true
-  sg="$(sg_id)"; [ -n "$sg" ] && echo "security group $SG_NAME $sg"
+  aws_ rds describe-db-clusters --query "DBClusters[?starts_with(DBClusterIdentifier,'$P')].[DBClusterIdentifier,EngineVersion,Status]" || return 1
+  aws_ rds describe-db-instances --query "DBInstances[?starts_with(DBInstanceIdentifier,'$P')].[DBInstanceIdentifier,DBInstanceClass,EngineVersion,DBInstanceStatus]" || return 1
+  sg="$(aws_ ec2 describe-security-groups --filters "Name=group-name,Values=$SG_NAME" --query 'SecurityGroups[0].GroupId')" || return 1
+  [ "$sg" != None ] && [ -n "$sg" ] && echo "security group $SG_NAME $sg"
   true
 }
 
@@ -247,7 +251,9 @@ down() {
   aws rds delete-db-parameter-group --db-parameter-group-name "$RPG" 2>/dev/null || true
   sg="$(sg_id)"; [ -n "$sg" ] && aws ec2 delete-security-group --group-id "$sg" || true
   log "left over (should be empty)"
-  status
+  left="$(status)" || { echo "could not verify the deletion (AWS API errors above): run '$0 status' again" >&2; exit 1; }
+  [ -z "$left" ] || { echo "$left"; echo "resources remain: run '$0 down' again" >&2; exit 1; }
+  echo "none"
 }
 
 case "${1:-}" in
@@ -255,6 +261,7 @@ case "${1:-}" in
   up) up ;;
   run) run ;;
   status) status ;;
+  psql) shift; target="${1:-cluster}"; [ $# -gt 0 ] && shift; connect_env "$target" writer; psql -X -d postgres "$@" ;;
   down) down ;;
   *) sed -n '2,20p' "$0"; exit 2 ;;
 esac

@@ -17,7 +17,7 @@ Tick every line before tagging. Record the evidence (command, result, date) next
 
 - [ ] Aurora PostgreSQL 17: `index_deps.resolved_plan_source()` returns `aurora_stat_plans`; lab run 0 FAIL. **Deferred: released without it (noted in the release notes).**
 - [x] RDS PostgreSQL 17, `--simulate-rds` in Docker: 0 FAIL (113 PASS, 2 KNOWN; 29 Oct). A real RDS run is optional.
-- [ ] pg_tle path: `install_pg_tle.sql` on a 0.7 install, then `ALTER EXTENSION pg_index_deps UPDATE` reaches 0.8. **Deferred** (no pg_tle in the Docker images; the update script itself is tested through `ALTER EXTENSION`).
+- [x] pg_tle path (checked 30 Oct 2026 for SQL edition 0.9, pg_tle 1.5.2, PG 17 in Docker): the 0.7 (v0.10) and 0.8 (v0.10.1) `install_pg_tle.sql`, `CREATE EXTENSION`, then the 0.9 `install_pg_tle.sql` and `ALTER EXTENSION pg_index_deps UPDATE` reach 0.9; rerunning the installer is a no-op; functions (definitions and settings) and relations match a fresh 0.9 install.
 
 ## Performance
 

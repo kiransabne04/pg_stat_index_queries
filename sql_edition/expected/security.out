@@ -143,6 +143,26 @@ HINT:  CREATE EXTENSION hypopg; this role also needs USAGE on its schema and EXE
 CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer,boolean) line 35 at RAISE
 RESET ROLE;
 GRANT EXECUTE ON FUNCTION hypopg_hide_index(oid) TO PUBLIC;
+-- 5. With no extension named (aurora_stat_plans is in pg_catalog on
+--    Aurora, hidden from pg_proc queries), pg_catalog is checked by the
+--    qualified name; a same-named function elsewhere is not accepted, even
+--    one owned by a superuser and first in the search_path.
+SELECT index_deps.ext_function(NULL, 'pg_get_indexdef', '{oid}') AS catalog_function;
+      catalog_function      
+----------------------------
+ pg_catalog.pg_get_indexdef
+(1 row)
+
+CREATE FUNCTION public.siq_probe(boolean) RETURNS int LANGUAGE sql AS 'SELECT 1';
+SET search_path = public;
+SELECT index_deps.ext_function(NULL, 'siq_probe', '{boolean}') IS NULL AS outside_catalog_rejected;
+ outside_catalog_rejected 
+--------------------------
+ t
+(1 row)
+
+RESET search_path;
+DROP FUNCTION public.siq_probe(boolean);
 DROP TABLE sec_t;
 DROP SCHEMA siq_low CASCADE;
 NOTICE:  drop cascades to 3 other objects

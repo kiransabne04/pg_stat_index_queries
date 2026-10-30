@@ -262,12 +262,12 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 10. **Column usage doesn't cover two cases.**
     - A plain ordered scan (ORDER BY on the index columns) and index-only coverage don't name columns. A column "not searched on" can still be needed for them.
     - Only key columns 1–32 are recorded.
-11. **More than 64 distinct indexes in one statement:** the extra indexes are not recorded for that statement.
+11. **Before 0.10.1, more than 64 distinct indexes in one statement:** the extra indexes were not recorded for that statement. Since 0.10.1 every index is recorded.
 12. **Parallel queries** are recorded once, by the leader.
 13. **Query statistics are per statement, not per index.** A query that uses three indexes shows the same timing on all three rows. `pct_calls_using_index` compares counters that are reset separately, so it can exceed 100.
 14. **Sampling** (`sample_rate < 1`) makes counts estimates, and a rare query can be missed entirely.
 15. **The native extension can't run on RDS or Aurora** (no custom C extensions). Use the SQL edition there.
-16. **Bitmap Index Scans always count as executed**, because PostgreSQL builds their scan state at executor start.
+16. **On PG 15 and 16, Bitmap Index Scans always count as executed**, because PostgreSQL builds their scan state at executor start. On PG 17+ a bitmap scan that never ran counts as planned only (since 0.10.1), except a parallel-aware one, which may have run only in workers and still counts as executed.
 17. **Stale-statistics hints right after a bulk load.**
     - A session's insert/update counts reach PostgreSQL's shared statistics up to a second late.
     - So a load followed at once by ANALYZE in the same session can still show the loaded rows in `n_mod_since_analyze`, and `stats_stale = true`. `pg_stat_user_tables` shows the same.
@@ -291,8 +291,10 @@ Details and raw results: README "Overhead" and [BENCHMARK.md](BENCHMARK.md).
 |---|---|
 | Native extension, PG 15–18 (Docker, CI) | Regression and TAP tests pass, including persistence after a real crash, eviction, flush across sessions and column sets across restarts |
 | SQL edition, PG 16–18 | Regression tests pass (parsing, live pg_stat_plans, drop impact, statistics, upgrades) |
-| Index lab, Docker PG 16–18 | 193 PASS, 0 FAIL, 5 KNOWN (documented limits above: same name in two schemas, renamed index, recreated index) |
-| Aurora PostgreSQL 17.9 (24 Oct 2026) | Index lab 115 PASS, 0 FAIL; reader instance tested |
-| RDS for PostgreSQL 17.11 (24 Oct 2026) | Index lab 33 PASS, 0 FAIL |
+| Index lab, Docker PG 16–18 | 193 PASS, 0 FAIL, 5 KNOWN (documented limits above: same name in two schemas, renamed index, recreated index); 194 / 0 / 5 on PG 17 with SQL edition 0.9 |
+| Aurora PostgreSQL 17.11 writer (29 Oct 2026, SQL edition 0.9) | Index lab 123 PASS, 0 FAIL, 4 KNOWN; plan source `aurora_stat_plans` |
+| Aurora PostgreSQL 17.9 (24 Oct 2026, SQL edition 0.4) | Index lab 115 PASS, 0 FAIL; reader instance tested |
+| RDS for PostgreSQL 17.11 (29 Oct 2026, SQL edition 0.9) | Index lab 41 PASS, 0 FAIL, 2 KNOWN |
+| pg_tle upgrade path (30 Oct 2026, pg_tle 1.5.2, PG 17 Docker) | 0.7 and 0.8 pg_tle installs update to 0.9; schema matches a fresh install |
 
 Details: [TESTING.md](TESTING.md).

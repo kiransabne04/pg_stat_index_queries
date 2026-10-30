@@ -166,7 +166,7 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 ## Limitations
 
 - Native extension: self-hosted only (RDS/Aurora don't allow custom C extensions).
-- Bitmap Index Scans always count as executed (Postgres builds their scan state at startup).
+- On PG 15/16, Bitmap Index Scans always count as executed (Postgres builds their scan state at startup). On PG 17+ only a parallel-aware bitmap scan does.
 - A crash loses the counts since the last periodic save (`save_interval`, default 5 minutes).
 - SQL edition only sees queries whose plans were captured, and loses ones evicted from pg_stat_statements.
 - `pg_index_query_stats` / `index_query_stats`: timing and buffers are per statement, not per index; a query using three indexes shows the same numbers on all three rows. `pct_calls_using_index` compares counters that are reset separately, so it can exceed 100 after a reset of one but not the other.

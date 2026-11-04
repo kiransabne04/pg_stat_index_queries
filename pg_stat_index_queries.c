@@ -1917,11 +1917,16 @@ pgsiq_ExecutorEnd(QueryDesc *queryDesc)
 				pg_prng_double(&pg_global_prng_state) >= pgsiq_sample_rate)
 			{
 				skip = true;
-				/* Unlocked read first: no shared write on every statement. */
+				/*
+				 * Unlocked read first: no shared write on every statement.
+				 * Marked dirty too, so the next snapshot records it even
+				 * when no counter changed (else a crash would lose it).
+				 */
 				if (!pgsiq->sampled)
 				{
 					SpinLockAcquire(&pgsiq->mutex);
 					pgsiq->sampled = true;
+					pgsiq->dirty = true;
 					SpinLockRelease(&pgsiq->mutex);
 				}
 			}

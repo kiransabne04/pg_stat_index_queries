@@ -16,6 +16,15 @@ SELECT uses_index_now, uses_index_after, plan_changed,
 -- The index is never left hidden.
 SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
 
+-- 0.10: an index the caller already hid (hypopg_hide_index) is not compared
+-- (both plans would be without it) and stays hidden afterwards.
+SELECT hypopg_hide_index('o_c_idx'::regclass) AS hidden_by_caller;
+SELECT cost_with IS NULL AND cost_without IS NULL AND plan_changed IS NULL AS not_compared, note
+  FROM index_deps.index_drop_impact('o_c_idx')
+ WHERE query LIKE '%FROM o WHERE c =%';
+SELECT array_agg(h.indexid::regclass) AS still_hidden FROM hypopg_hidden_indexes() h;
+SELECT hypopg_unhide_index('o_c_idx'::regclass) AS unhidden_by_caller;
+
 -- Error path: a dependent query that no longer plans (column dropped).
 ALTER TABLE o ADD COLUMN x int;
 SELECT count(*) FROM o WHERE c = 9 AND x IS NULL;

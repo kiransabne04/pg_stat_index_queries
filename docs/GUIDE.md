@@ -235,7 +235,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
   - A new library works with not-yet-updated SQL objects until `ALTER EXTENSION ... UPDATE`.
 - **Statistics.** Columns the caller can't SELECT show `has_stats = false`. Expression indexes use the statistics ANALYZE keeps for the index.
 - **Drop impact (SQL edition).**
-  - The index is unhidden on every path, including errors and cancellation.
+  - The index is unhidden on every path, including errors and cancellation. If you had already hidden it yourself (`hypopg_hide_index`), it is not compared ("skipped: the index is already hidden …") and stays hidden (SQL edition 0.10+; before, it was compared hidden in both plans and then unhidden).
   - Data-changing statements are skipped.
   - Queries that fail to plan are skipped cleanly.
   - Typed literals and `PREPARE` texts are rewritten so they can be EXPLAINed.

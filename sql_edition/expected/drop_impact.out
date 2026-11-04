@@ -37,6 +37,34 @@ SELECT count(*) AS still_hidden FROM hypopg_hidden_indexes();
             0
 (1 row)
 
+-- 0.10: an index the caller already hid (hypopg_hide_index) is not compared
+-- (both plans would be without it) and stays hidden afterwards.
+SELECT hypopg_hide_index('o_c_idx'::regclass) AS hidden_by_caller;
+ hidden_by_caller 
+------------------
+ t
+(1 row)
+
+SELECT cost_with IS NULL AND cost_without IS NULL AND plan_changed IS NULL AS not_compared, note
+  FROM index_deps.index_drop_impact('o_c_idx')
+ WHERE query LIKE '%FROM o WHERE c =%';
+ not_compared |                                                                                 note                                                                                  
+--------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ t            | skipped: the index is already hidden in this session (hypopg_hide_index), so there is no plan with it to compare; left hidden (hypopg_unhide_index first to check it)
+(1 row)
+
+SELECT array_agg(h.indexid::regclass) AS still_hidden FROM hypopg_hidden_indexes() h;
+ still_hidden 
+--------------
+ {o_c_idx}
+(1 row)
+
+SELECT hypopg_unhide_index('o_c_idx'::regclass) AS unhidden_by_caller;
+ unhidden_by_caller 
+--------------------
+ t
+(1 row)
+
 -- Error path: a dependent query that no longer plans (column dropped).
 ALTER TABLE o ADD COLUMN x int;
 SELECT count(*) FROM o WHERE c = 9 AND x IS NULL;
@@ -71,7 +99,7 @@ SELECT note FROM index_deps.index_drop_impact('o_c_idx') WHERE query LIKE 'UPDAT
 -- Errors
 SELECT index_deps.index_drop_impact('o'::regclass);
 ERROR:  o is not an index
-CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer,boolean) line 57 at RAISE
+CONTEXT:  PL/pgSQL function index_deps.index_drop_impact(regclass,boolean,integer,integer,boolean) line 61 at RAISE
 -- Query text EXPLAIN can't take as is: typed literals and PREPARE.
 SELECT q AS input, index_deps.explainable_query(q) AS explained
   FROM unnest(ARRAY[

@@ -1,7 +1,7 @@
--- pg_index_deps 0.9, plain install (generated, do not edit)
+-- pg_index_deps 0.10, plain install (generated, do not edit)
 CREATE SCHEMA IF NOT EXISTS index_deps;
 SET search_path = index_deps, public;
-/* pg_index_deps--0.9.sql
+/* pg_index_deps--0.10.sql
  *
  * SQL edition of pg_stat_index_queries. No C code, so it installs on managed
  * Postgres (Amazon Aurora, RDS) as well as self-hosted servers.
@@ -801,11 +801,14 @@ DECLARE
     v_blocker      text;
     v_stats_note   text;
     v_hidden       boolean := false;
+    v_prehidden    boolean;
+    v_ok           boolean;
     v_source       text;
     v_cands        jsonb;
     v_start        timestamptz := pg_catalog.clock_timestamp();
     v_hide         text;
     v_unhide       text;
+    v_hidden_list  text;
     v_pgss         text;
     v_siq          text;
     v_explain      text;
@@ -821,9 +824,10 @@ BEGIN
     END IF;
     v_hide := index_deps.ext_function('hypopg', 'hypopg_hide_index', '{oid}');
     v_unhide := index_deps.ext_function('hypopg', 'hypopg_unhide_index', '{oid}');
+    v_hidden_list := index_deps.ext_function('hypopg', 'hypopg_hidden_indexes', '{}');
     -- Checked before format(): it turns NULL into '', and "SELECT ($1)"
     -- would run without hiding anything.
-    IF v_hide IS NULL OR v_unhide IS NULL THEN
+    IF v_hide IS NULL OR v_unhide IS NULL OR v_hidden_list IS NULL THEN
         RAISE EXCEPTION 'HypoPG 1.4 or later is required'
             USING HINT = 'CREATE EXTENSION hypopg; this role also needs USAGE on its schema and EXECUTE on its functions';
     END IF;
@@ -848,6 +852,11 @@ BEGIN
     IF NOT FOUND THEN
         RAISE EXCEPTION '% is not an index', v_index_label;
     END IF;
+    -- Hidden already in this session (hypopg_hide_index): there is no plan
+    -- with the index to compare, and unhiding it afterwards would change
+    -- the caller's session. Nothing is compared and it stays hidden.
+    EXECUTE format('SELECT $1 IN (SELECT h.indexid FROM %s() h)', v_hidden_list)
+       INTO v_prehidden USING p_index::oid;
     -- These print relation names as the caller would see them.
     PERFORM pg_catalog.set_config('search_path', v_path, true);
     SELECT ir.drop_blocker INTO v_blocker FROM index_deps.index_role(p_index) ir;
@@ -928,6 +937,14 @@ BEGIN
             CONTINUE;
         END IF;
 
+        IF v_prehidden THEN
+            note := 'skipped: the index is already hidden in this session (hypopg_hide_index),'
+                    ' so there is no plan with it to compare; left hidden (hypopg_unhide_index first'
+                    ' to check it)';
+            RETURN NEXT;
+            CONTINUE;
+        END IF;
+
         IF NOT r.trusted THEN
             IF NOT p_trust_other_roles THEN
                 note := format('skipped: recorded only by %s, without your privileges; planning would run'
@@ -969,7 +986,11 @@ BEGIN
             EXECUTE v_explain INTO j_with;
             PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
 
-            EXECUTE v_hide USING p_index::oid;
+            -- false: HypoPG did not hide it, so there is nothing to undo.
+            EXECUTE v_hide INTO v_ok USING p_index::oid;
+            IF v_ok IS NOT TRUE THEN
+                RAISE EXCEPTION 'HypoPG did not hide the index';
+            END IF;
             v_hidden := true;
 
             PERFORM pg_catalog.set_config('search_path', v_path, true);
@@ -1045,7 +1066,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION index_deps.index_drop_impact(regclass, boolean, integer, integer, boolean) IS
-'Estimate what happens to dependent queries if an index is dropped. Hides the index with HypoPG (this session only), re-plans with EXPLAIN (GENERIC_PLAN), compares cost and plan shape. Never executes queries or drops anything. Works in read-only transactions. p_timeout_ms is a time budget for the whole call. Queries recorded only by roles without your privileges are skipped unless p_trust_other_roles (planning runs functions in the query text as you).';
+'Estimate what happens to dependent queries if an index is dropped. Hides the index with HypoPG (this session only), re-plans with EXPLAIN (GENERIC_PLAN), compares cost and plan shape. Never executes queries or drops anything. Works in read-only transactions. An index already hidden in this session (hypopg_hide_index) is left hidden and not compared. p_timeout_ms is a time budget for the whole call. Queries recorded only by roles without your privileges are skipped unless p_trust_other_roles (planning runs functions in the query text as you).';
 
 GRANT USAGE ON SCHEMA index_deps TO PUBLIC;
 GRANT SELECT ON index_deps.plan_index_usage, index_deps.index_dependents,

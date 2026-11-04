@@ -49,6 +49,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **SQL edition 0.6 → 0.7:** `ALTER EXTENSION pg_index_deps UPDATE TO '0.7';` (or rerun `install_pg_tle.sql`, then `ALTER EXTENSION pg_index_deps UPDATE`). Same foreign-key change in `index_deps.index_role`.
 
+**SQL edition 0.9 → 0.10:** `ALTER EXTENSION pg_index_deps UPDATE TO '0.10';` (or rerun `install_pg_tle.sql`, then `ALTER EXTENSION pg_index_deps UPDATE`). `index_drop_impact` leaves an index you already hid with `hypopg_hide_index` hidden and doesn't compare it; same signature, nothing dropped.
+
 **SQL edition 0.8 → 0.9:** `ALTER EXTENSION pg_index_deps UPDATE TO '0.9';` (or rerun `install_pg_tle.sql`, then `ALTER EXTENSION pg_index_deps UPDATE`). Fixes the plan source on Aurora (0.8 found none there); nothing else changes.
 
 **SQL edition 0.7 → 0.8:** `ALTER EXTENSION pg_index_deps UPDATE TO '0.8';` (or rerun `install_pg_tle.sql`, then `ALTER EXTENSION pg_index_deps UPDATE`). Security fixes in `index_drop_impact`: queries recorded only by roles without your privileges are now skipped (`note` says which role; pass `p_trust_other_roles => true` to plan them anyway, or run the check connected as that role), and HypoPG / pg_stat_statements are found through their extension, not your search_path. The function is dropped and recreated with a new last parameter; your own objects that depend on it must be dropped first.

@@ -66,7 +66,13 @@ SELECT to_regprocedure('index_deps.index_drop_impact(regclass, boolean, integer,
 ALTER EXTENSION pg_index_deps UPDATE TO '0.9';
 SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
 SELECT index_deps.ext_function(NULL, 'pg_get_indexdef', '{oid}') AS catalog_function;
--- The upgraded objects (0.1 -> ... -> 0.9) must be identical to a fresh install.
+-- 0.9 -> 0.10: index_drop_impact leaves an index the caller already hid
+-- alone (same signature, replaced in place).
+ALTER EXTENSION pg_index_deps UPDATE TO '0.10';
+SELECT extversion FROM pg_extension WHERE extname = 'pg_index_deps';
+SELECT obj_description('index_deps.index_drop_impact(regclass, boolean, integer, integer, boolean)'::regprocedure)
+       LIKE '%already hidden in this session%' AS new_comment;
+-- The upgraded objects (0.1 -> ... -> 0.10) must be identical to a fresh install.
 CREATE TEMP TABLE defs_upgraded AS
 SELECT 'function ' || p.oid::regprocedure::text AS name, pg_get_functiondef(p.oid) AS def
   FROM pg_proc p WHERE p.pronamespace = 'index_deps'::regnamespace

@@ -158,12 +158,14 @@ my $file = $node->data_dir . '/pg_stat/pg_stat_index_queries.stat';
 
 sub write_file
 {
-	my ($executed, $planned, $first, $last, $extra) = @_;
+	my ($executed, $planned, $first, $last, $extra, $complete) = @_;
+	$complete = 1 unless defined $complete;
 	$node->stop;
 	open(my $fh, '>:raw', $file) or die "cannot write $file";
-	print $fh pack('V l< q< q< q< C', 0x51495303, $major, 1, 0, 0, 0);
-	print $fh pack('V V q< C x7 q< q< q< q< V V',
-		$dbid, $relid, $queryid, 1, $executed, $planned, $first, $last, 1, 0);
+	print $fh pack('V l< q< q< q< C', 0x51495304, $major, 1, 0, 0, 0);
+	print $fh pack('V V q< C x7 q< q< q< q< V V C',
+		$dbid, $relid, $queryid, 1, $executed, $planned, $first, $last, 1, 0,
+		$complete);
 	print $fh $extra if defined $extra;
 	close($fh);
 	my $logstart = -s $node->logfile;
@@ -182,6 +184,8 @@ write_file(1, 1, $now + 10, $now);
 is(calls('f_a_idx'), '0', 'first_seen after last_seen: file rejected');
 write_file(1, 1, $now, $now, "garbage");
 is(calls('f_a_idx'), '0', 'trailing bytes: file rejected');
+write_file(1, 1, $now, $now, undef, 2);
+is(calls('f_a_idx'), '0', 'columns_complete byte other than 0/1: file rejected');
 
 # 5. A valid file loads; counters saturate instead of overflowing.
 write_file('9223372036854775806', '9223372036854775806', $now, $now);

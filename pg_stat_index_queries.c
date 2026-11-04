@@ -86,7 +86,8 @@ PG_MODULE_MAGIC;
 #define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
 /* Periodic snapshot (0.10); not in base backups. */
 #define PGSIQ_SNAP_FILE		PG_STAT_TMP_DIR "/pg_stat_index_queries.snap"
-#define PGSIQ_FILE_HEADER	0x51495303	/* "SIQ" + format version 3 */
+#define PGSIQ_FILE_HEADER	0x51495304	/* "SIQ" + format version 4 */
+#define PGSIQ_FILE_HEADER_V3	0x51495303	/* still read: no cols_complete */
 #define PGSIQ_FILE_HEADER_V2	0x51495302	/* still read: no column masks */
 #define PGSIQ_FILE_HEADER_V1	0x51495301	/* still read: no sampled flag */
 #define PGSIQ_MAX_PENDING	512		/* local entries before a forced flush */
@@ -502,10 +503,14 @@ pgsiq_shmem_startup(void)
 /*
  * File layout: header, PG major, entry count, dealloc, stats_reset, sampled
  * (version 2+), then entry_count records of (key, calls_executed,
- * calls_planned, first_seen, last_seen, and in version 3 cond_cols and
- * order_cols). Any mismatch or short read discards the whole file.
- * Version 1 (0.1-0.5) and 2 (0.6-0.7) files are still read; their entries
- * get cols_complete = false, so no column is reported as unused.
+ * calls_planned, first_seen, last_seen, in version 3+ cond_cols and
+ * order_cols, and in version 4 a cols_complete byte). Any mismatch or short
+ * read discards the whole file.
+ * Version 1 (0.1-0.5), 2 (0.6-0.7) and 3 (0.8-0.10.1) files are still read;
+ * their entries get cols_complete = false, so no column is reported as
+ * unused. Version 3 had masks but didn't store the flag, so an entry first
+ * loaded from a version 1/2 file was written back as if complete: which
+ * entries those are can't be told, so all of them count as incomplete.
  *
  * Two files with that layout:
  * - PGSIQ_DUMP_FILE (pg_stat/): written at clean shutdown, removed after
@@ -544,8 +549,8 @@ pgsiq_read_file(const char *path)
 		fread(&stats_reset, sizeof(TimestampTz), 1, file) != 1)
 		goto bad_file;
 
-	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V2 &&
-		 header != PGSIQ_FILE_HEADER_V1) ||
+	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V3 &&
+		 header != PGSIQ_FILE_HEADER_V2 && header != PGSIQ_FILE_HEADER_V1) ||
 		pgmajor != PGSIQ_PG_MAJOR || count < 0 || dealloc < 0)
 		goto bad_file;
 	if (header != PGSIQ_FILE_HEADER_V1)
@@ -572,11 +577,19 @@ pgsiq_read_file(const char *path)
 			goto bad_file;
 		temp.cond_cols = 0;
 		temp.order_cols = 0;
-		temp.cols_complete = (header == PGSIQ_FILE_HEADER);
-		if (temp.cols_complete &&
+		temp.cols_complete = false;
+		if ((header == PGSIQ_FILE_HEADER || header == PGSIQ_FILE_HEADER_V3) &&
 			(fread(&temp.cond_cols, sizeof(uint32), 1, file) != 1 ||
 			 fread(&temp.order_cols, sizeof(uint32), 1, file) != 1))
 			goto bad_file;
+		if (header == PGSIQ_FILE_HEADER)
+		{
+			unsigned char b;
+
+			if (fread(&b, 1, 1, file) != 1 || b > 1)
+				goto bad_file;
+			temp.cols_complete = (b == 1);
+		}
 
 		/*
 		 * Reject counters the writer can't produce (a damaged file): the
@@ -718,13 +731,16 @@ pgsiq_snapshot(int64 *count)
 static bool
 write_entry(FILE *file, const pgsiqEntry *entry)
 {
+	unsigned char complete = entry->cols_complete ? 1 : 0;
+
 	return fwrite(&entry->key, sizeof(pgsiqHashKey), 1, file) == 1 &&
 		fwrite(&entry->calls_executed, sizeof(int64), 1, file) == 1 &&
 		fwrite(&entry->calls_planned, sizeof(int64), 1, file) == 1 &&
 		fwrite(&entry->first_seen, sizeof(TimestampTz), 1, file) == 1 &&
 		fwrite(&entry->last_seen, sizeof(TimestampTz), 1, file) == 1 &&
 		fwrite(&entry->cond_cols, sizeof(uint32), 1, file) == 1 &&
-		fwrite(&entry->order_cols, sizeof(uint32), 1, file) == 1;
+		fwrite(&entry->order_cols, sizeof(uint32), 1, file) == 1 &&
+		fwrite(&complete, 1, 1, file) == 1;
 }
 
 /*

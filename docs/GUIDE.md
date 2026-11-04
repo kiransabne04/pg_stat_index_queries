@@ -204,7 +204,7 @@ SELECT entries, dealloc, stats_reset FROM pg_stat_index_queries_info;
 SELECT pg_stat_index_queries_sampled();
 ```
 
-If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. Until then, "no recorded use" means "unknown".
+If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. Until then, "no recorded use" means "unknown". The same goes for `pg_stat_index_queries_sampled()` = true: some statements were not recorded, because of `sample_rate` < 1 or (native 0.10.2+) because the backend ran out of memory while recording one; `pg_index_usage` then says "unknown" instead of "no recorded use".
 
 ## Settings (native)
 

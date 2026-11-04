@@ -4,6 +4,8 @@
 # crash doesn't bring old counters back; save = off and save_interval = 0
 # remove the snapshot. A replica made with pg_basebackup doesn't start with
 # the primary's counters. save_interval raised by a reload takes effect.
+# Statements skipped by sample_rate alone still get the sampled flag into
+# the snapshot.
 use strict;
 use warnings FATAL => 'all';
 use PostgreSQL::Test::Cluster;
@@ -136,6 +138,22 @@ $node->reload;
 ok(wait_for(sub { -e $file }), 'raising save_interval by reload starts saving');
 crash();
 is($node->safe_psql('postgres', $count_sql), '1', 'counters survive a crash after the reload');
+
+# Only skipped statements (sample_rate = 0): no counter changes, but the
+# sampled flag must still reach the snapshot and survive a crash, or the
+# counts would look exact.
+my $sampled_sql = q{SELECT pg_stat_index_queries_sampled()};
+$node->safe_psql('postgres', 'SELECT pg_stat_index_queries_reset()');
+ok(wait_for(sub { -e $file }), 'snapshot written after reset');
+is($node->safe_psql('postgres', $sampled_sql), 'f', 'not sampled after reset');
+$before = mtime();
+$node->safe_psql('postgres',
+	"SET pg_stat_index_queries.sample_rate = 0; $query");
+is($node->safe_psql('postgres', $sampled_sql), 't', 'skipped statement sets sampled');
+is($node->safe_psql('postgres', $count_sql), '0', 'skipped statement not counted');
+ok(wait_for(sub { -e $file && mtime() > $before }), 'sampled flag alone triggers a save');
+crash();
+is($node->safe_psql('postgres', $sampled_sql), 't', 'sampled flag survives a crash');
 
 $node->stop;
 done_testing();

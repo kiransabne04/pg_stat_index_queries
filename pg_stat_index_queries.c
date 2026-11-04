@@ -86,7 +86,8 @@ PG_MODULE_MAGIC;
 #define PGSIQ_DUMP_FILE		PGSTAT_STAT_PERMANENT_DIRECTORY "/pg_stat_index_queries.stat"
 /* Periodic snapshot (0.10); not in base backups. */
 #define PGSIQ_SNAP_FILE		PG_STAT_TMP_DIR "/pg_stat_index_queries.snap"
-#define PGSIQ_FILE_HEADER	0x51495303	/* "SIQ" + format version 3 */
+#define PGSIQ_FILE_HEADER	0x51495304	/* "SIQ" + format version 4 */
+#define PGSIQ_FILE_HEADER_V3	0x51495303	/* still read: no cols_complete */
 #define PGSIQ_FILE_HEADER_V2	0x51495302	/* still read: no column masks */
 #define PGSIQ_FILE_HEADER_V1	0x51495301	/* still read: no sampled flag */
 #define PGSIQ_MAX_PENDING	512		/* local entries before a forced flush */
@@ -173,7 +174,8 @@ typedef struct pgsiqSeenIndex
  * Indexes of one statement. The first PGSIQ_SEEN_INLINE are de-duplicated
  * as they come; beyond that the array grows (palloc, in the executor's
  * memory) without per-index search, and is sorted and merged once at the
- * end, so a statement over many partitions costs O(n log n).
+ * end, so a statement over many partitions costs O(n log n). If growing it
+ * fails, the statement is not recorded (never an error for the user).
  */
 typedef struct pgsiqWalkContext
 {
@@ -181,6 +183,7 @@ typedef struct pgsiqWalkContext
 	int			maxseen;
 	bool		needs_merge;
 	bool		bitmap_ran;		/* the enclosing bitmap heap scan ran */
+	bool		incomplete;		/* out of memory: statement not recorded */
 	pgsiqSeenIndex *seen;
 	pgsiqSeenIndex inline_seen[PGSIQ_SEEN_INLINE];
 } pgsiqWalkContext;
@@ -287,7 +290,7 @@ static void known_add(const pgsiqHashKey *key);
 static bool known_in_shared(const pgsiqHashKey *key);
 static void pgsiq_backend_exit(int code, Datum arg);
 static void pending_discard(void);
-static void entry_dealloc(void);
+static bool entry_dealloc(void);
 static void pgsiq_shmem_shutdown(int code, Datum arg);
 static bool pgsiq_read_file(const char *path);
 static void pgsiq_load_file(void);
@@ -502,10 +505,14 @@ pgsiq_shmem_startup(void)
 /*
  * File layout: header, PG major, entry count, dealloc, stats_reset, sampled
  * (version 2+), then entry_count records of (key, calls_executed,
- * calls_planned, first_seen, last_seen, and in version 3 cond_cols and
- * order_cols). Any mismatch or short read discards the whole file.
- * Version 1 (0.1-0.5) and 2 (0.6-0.7) files are still read; their entries
- * get cols_complete = false, so no column is reported as unused.
+ * calls_planned, first_seen, last_seen, in version 3+ cond_cols and
+ * order_cols, and in version 4 a cols_complete byte). Any mismatch or short
+ * read discards the whole file.
+ * Version 1 (0.1-0.5), 2 (0.6-0.7) and 3 (0.8-0.10.1) files are still read;
+ * their entries get cols_complete = false, so no column is reported as
+ * unused. Version 3 had masks but didn't store the flag, so an entry first
+ * loaded from a version 1/2 file was written back as if complete: which
+ * entries those are can't be told, so all of them count as incomplete.
  *
  * Two files with that layout:
  * - PGSIQ_DUMP_FILE (pg_stat/): written at clean shutdown, removed after
@@ -544,8 +551,8 @@ pgsiq_read_file(const char *path)
 		fread(&stats_reset, sizeof(TimestampTz), 1, file) != 1)
 		goto bad_file;
 
-	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V2 &&
-		 header != PGSIQ_FILE_HEADER_V1) ||
+	if ((header != PGSIQ_FILE_HEADER && header != PGSIQ_FILE_HEADER_V3 &&
+		 header != PGSIQ_FILE_HEADER_V2 && header != PGSIQ_FILE_HEADER_V1) ||
 		pgmajor != PGSIQ_PG_MAJOR || count < 0 || dealloc < 0)
 		goto bad_file;
 	if (header != PGSIQ_FILE_HEADER_V1)
@@ -572,11 +579,19 @@ pgsiq_read_file(const char *path)
 			goto bad_file;
 		temp.cond_cols = 0;
 		temp.order_cols = 0;
-		temp.cols_complete = (header == PGSIQ_FILE_HEADER);
-		if (temp.cols_complete &&
+		temp.cols_complete = false;
+		if ((header == PGSIQ_FILE_HEADER || header == PGSIQ_FILE_HEADER_V3) &&
 			(fread(&temp.cond_cols, sizeof(uint32), 1, file) != 1 ||
 			 fread(&temp.order_cols, sizeof(uint32), 1, file) != 1))
 			goto bad_file;
+		if (header == PGSIQ_FILE_HEADER)
+		{
+			unsigned char b;
+
+			if (fread(&b, 1, 1, file) != 1 || b > 1)
+				goto bad_file;
+			temp.cols_complete = (b == 1);
+		}
 
 		/*
 		 * Reject counters the writer can't produce (a damaged file): the
@@ -718,13 +733,16 @@ pgsiq_snapshot(int64 *count)
 static bool
 write_entry(FILE *file, const pgsiqEntry *entry)
 {
+	unsigned char complete = entry->cols_complete ? 1 : 0;
+
 	return fwrite(&entry->key, sizeof(pgsiqHashKey), 1, file) == 1 &&
 		fwrite(&entry->calls_executed, sizeof(int64), 1, file) == 1 &&
 		fwrite(&entry->calls_planned, sizeof(int64), 1, file) == 1 &&
 		fwrite(&entry->first_seen, sizeof(TimestampTz), 1, file) == 1 &&
 		fwrite(&entry->last_seen, sizeof(TimestampTz), 1, file) == 1 &&
 		fwrite(&entry->cond_cols, sizeof(uint32), 1, file) == 1 &&
-		fwrite(&entry->order_cols, sizeof(uint32), 1, file) == 1;
+		fwrite(&entry->order_cols, sizeof(uint32), 1, file) == 1 &&
+		fwrite(&complete, 1, 1, file) == 1;
 }
 
 /*
@@ -1505,11 +1523,19 @@ remember_index(pgsiqWalkContext *ctx, Oid indexrelid, bool executed,
 
 	if (ctx->nseen >= PGSIQ_SEEN_INLINE)
 		ctx->needs_merge = true;
+	if (ctx->incomplete)
+		return;
 	if (ctx->nseen >= ctx->maxseen)
 	{
 		pgsiqSeenIndex *bigger;
 
-		bigger = palloc(sizeof(pgsiqSeenIndex) * ctx->maxseen * 2);
+		bigger = palloc_extended(sizeof(pgsiqSeenIndex) * ctx->maxseen * 2,
+								 MCXT_ALLOC_NO_OOM);
+		if (bigger == NULL)
+		{
+			ctx->incomplete = true;
+			return;
+		}
 		memcpy(bigger, ctx->seen, sizeof(pgsiqSeenIndex) * ctx->nseen);
 		if (ctx->seen != ctx->inline_seen)
 			pfree(ctx->seen);
@@ -1690,6 +1716,24 @@ mark_dirty(void)
 	}
 }
 
+/*
+ * A statement was not recorded (sample_rate, or out of memory), so the
+ * counts are no longer exact. Unlocked read first: no shared write on every
+ * statement. Marked dirty too, so the next snapshot records the flag even
+ * when no counter changed (else a crash would lose it).
+ */
+static void
+mark_sampled(void)
+{
+	if (!pgsiq->sampled)
+	{
+		SpinLockAcquire(&pgsiq->mutex);
+		pgsiq->sampled = true;
+		pgsiq->dirty = true;
+		SpinLockRelease(&pgsiq->mutex);
+	}
+}
+
 /* Forget the known keys if shared entries may have been reset or evicted. */
 static void
 known_validate(void)
@@ -1828,11 +1872,23 @@ pgsiq_flush(bool force)
 				continue;
 			}
 
-			if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max)
-				entry_dealloc();
-
+			/*
+			 * Another backend may have inserted the key since the scan
+			 * under the shared lock: then there is nothing to evict for.
+			 * If eviction can't get memory, the counts stay pending and
+			 * are retried at the next flush.
+			 */
 			entry = (pgsiqEntry *) hash_search(pgsiq_hash, &p->key,
-											   HASH_ENTER, &found);
+											   HASH_FIND, NULL);
+			found = (entry != NULL);
+			if (!found)
+			{
+				if (hash_get_num_entries(pgsiq_hash) >= pgsiq_max &&
+					!entry_dealloc())
+					continue;
+				entry = (pgsiqEntry *) hash_search(pgsiq_hash, &p->key,
+												   HASH_ENTER, &found);
+			}
 			if (!found)
 			{
 				SpinLockInit(&entry->mutex);
@@ -1901,13 +1957,7 @@ pgsiq_ExecutorEnd(QueryDesc *queryDesc)
 				pg_prng_double(&pg_global_prng_state) >= pgsiq_sample_rate)
 			{
 				skip = true;
-				/* Unlocked read first: no shared write on every statement. */
-				if (!pgsiq->sampled)
-				{
-					SpinLockAcquire(&pgsiq->mutex);
-					pgsiq->sampled = true;
-					SpinLockRelease(&pgsiq->mutex);
-				}
+				mark_sampled();
 			}
 			else
 			{
@@ -1926,15 +1976,20 @@ pgsiq_ExecutorEnd(QueryDesc *queryDesc)
 			ctx.maxseen = PGSIQ_SEEN_INLINE;
 			ctx.needs_merge = false;
 			ctx.bitmap_ran = true;
+			ctx.incomplete = false;
 			ctx.seen = ctx.inline_seen;
 
 			/* planstate_tree_walker() skips the root node; visit it ourselves. */
 			pgsiq_walker(queryDesc->planstate, &ctx);
-			if (ctx.needs_merge)
-				seen_merge(&ctx);
-
-			if (ctx.nseen > 0)
-				pgsiq_accumulate(&ctx, queryid, nesting_level == 0, weight);
+			if (ctx.incomplete)
+				mark_sampled();	/* not recorded: counts no longer exact */
+			else
+			{
+				if (ctx.needs_merge)
+					seen_merge(&ctx);
+				if (ctx.nseen > 0)
+					pgsiq_accumulate(&ctx, queryid, nesting_level == 0, weight);
+			}
 		}
 	}
 
@@ -1959,8 +2014,11 @@ entry_cmp(const void *lhs, const void *rhs)
 	return 0;
 }
 
-/* Caller must hold an exclusive lock. Evicts least recently seen entries. */
-static void
+/*
+ * Caller must hold an exclusive lock. Evicts least recently seen entries.
+ * Returns false, evicting nothing, if there is no memory to sort them.
+ */
+static bool
 entry_dealloc(void)
 {
 	HASH_SEQ_STATUS hash_seq;
@@ -1970,7 +2028,10 @@ entry_dealloc(void)
 	int			nvictims;
 	int			i;
 
-	entries = palloc(hash_get_num_entries(pgsiq_hash) * sizeof(pgsiqEntry *));
+	entries = palloc_extended(Max(hash_get_num_entries(pgsiq_hash), 1) *
+							  sizeof(pgsiqEntry *), MCXT_ALLOC_NO_OOM);
+	if (entries == NULL)
+		return false;
 
 	i = 0;
 	hash_seq_init(&hash_seq, pgsiq_hash);
@@ -1992,6 +2053,7 @@ entry_dealloc(void)
 	pgsiq->dealloc++;
 	SpinLockRelease(&pgsiq->mutex);
 	pg_atomic_fetch_add_u64(&pgsiq->change_count, 1);
+	return true;
 }
 
 /* ---------- SQL-callable functions ---------- */

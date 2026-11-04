@@ -204,7 +204,7 @@ SELECT entries, dealloc, stats_reset FROM pg_stat_index_queries_info;
 SELECT pg_stat_index_queries_sampled();
 ```
 
-If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. Until then, "no recorded use" means "unknown".
+If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. Until then, "no recorded use" means "unknown". The same goes for `pg_stat_index_queries_sampled()` = true: some statements were not recorded, because of `sample_rate` < 1 or (native 0.10.2+) because the backend ran out of memory while recording one; `pg_index_usage` then says "unknown" instead of "no recorded use".
 
 ## Settings (native)
 
@@ -231,7 +231,7 @@ If `dealloc > 0`, raise `pg_stat_index_queries.max` (restart needed) and reset. 
 - **Partitions.** Partition indexes fold into the parent; attached partition indexes are never listed on their own, since they can't be dropped separately.
 - **Upgrades.**
   - Counters saved by an older version are read after the upgrade.
-  - Counts from before 0.8 have `columns_complete = false`, so column usage says "unknown" instead of "not searched".
+  - Counts from before 0.8 have `columns_complete = false`, so column usage says "unknown" instead of "not searched". Upgrading the library to native 0.10.2 also marks all counts saved by 0.8–0.10.1 incomplete (those versions could lose the flag on restart); `pg_stat_index_queries_reset()` starts a complete record.
   - A new library works with not-yet-updated SQL objects until `ALTER EXTENSION ... UPDATE`.
 - **Statistics.** Columns the caller can't SELECT show `has_stats = false`. Expression indexes use the statistics ANALYZE keeps for the index.
 - **Drop impact (SQL edition).**

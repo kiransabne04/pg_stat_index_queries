@@ -32,7 +32,7 @@ This repository answers "which queries use this index", and builds on it:
 
 | | `pg_stat_index_queries` (native, C) | `pg_index_deps` (SQL edition) |
 |---|---|---|
-| Runs on | Self-hosted PostgreSQL 15–18 | Anywhere, including Amazon RDS and Aurora; drop impact needs PG 16+ and HypoPG |
+| Runs on | Self-hosted PostgreSQL 15–19 | Anywhere, including Amazon RDS and Aurora; drop impact needs PG 16+ and HypoPG |
 | How it knows | Executor hooks walk every executed plan | Reads index names from captured plan text (`aurora_stat_plans` on Aurora, `pg_stat_plans` self-hosted) |
 | Accuracy | Exact; separates planned from executed | Approximate: calls per captured plan that names the index |
 | Object names | `pg_index_*` in the extension's schema | `index_deps.*` |
@@ -289,9 +289,9 @@ Details and raw results: README "Overhead" and [BENCHMARK.md](BENCHMARK.md).
 
 | Where | Result |
 |---|---|
-| Native extension, PG 15–18 (Docker, CI) | Regression and TAP tests pass, including persistence after a real crash, eviction, flush across sessions and column sets across restarts |
-| SQL edition, PG 16–18 | Regression tests pass (parsing, live pg_stat_plans, drop impact, statistics, upgrades) |
-| Index lab, Docker PG 16–18 | 193 PASS, 0 FAIL, 5 KNOWN (documented limits above: same name in two schemas, renamed index, recreated index) |
+| Native extension, PG 15–19 (Docker, CI; 19 since 27 Nov 2026) | Regression and TAP tests pass, including persistence after a real crash, eviction, flush across sessions and column sets across restarts |
+| SQL edition, PG 16–19 | Regression tests pass (parsing, live pg_stat_plans, drop impact, statistics, upgrades) |
+| Index lab, Docker PG 16–19 | 194 PASS, 0 FAIL, 5 KNOWN (27 Nov 2026, SQL edition 0.10; documented limits above: same name in two schemas, renamed index, recreated index) |
 | Aurora PostgreSQL 17.9 (24 Oct 2026) | Index lab 115 PASS, 0 FAIL; reader instance tested |
 | RDS for PostgreSQL 17.11 (24 Oct 2026) | Index lab 33 PASS, 0 FAIL |
 

@@ -1,6 +1,6 @@
 # Installing
 
-## 1. Self-hosted Postgres 15–18 (native extension)
+## 1. Self-hosted Postgres 15–19 (native extension)
 
 Debian/Ubuntu (PGDG packages):
 

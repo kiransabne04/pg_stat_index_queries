@@ -22,7 +22,7 @@
  * (Vars in indexqual) and ordered by (indexorderby, e.g. KNN), as bitmasks
  * OR'd over the scans that ran.
  *
- * Supported: PostgreSQL 15, 16, 17, 18.
+ * Supported: PostgreSQL 15, 16, 17, 18, 19.
  *
  * Copyright (c) 2026, Kiran Sabne
  * Released under the PostgreSQL License.
@@ -31,6 +31,7 @@
  */
 #include "postgres.h"
 
+#include "access/htup_details.h"
 #include "access/parallel.h"
 #include "access/transam.h"
 #include "access/xact.h"
@@ -72,6 +73,7 @@
 #include "utils/ruleutils.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
+#include "utils/tuplestore.h"
 
 #include <math.h>
 #include <unistd.h>
@@ -484,10 +486,18 @@ pgsiq_shmem_startup(void)
 
 	info.keysize = sizeof(pgsiqHashKey);
 	info.entrysize = sizeof(pgsiqEntry);
+	/* PG 19 dropped the separate init_size argument. */
+#if PG_VERSION_NUM >= 190000
+	pgsiq_hash = ShmemInitHash("pg_stat_index_queries hash",
+							   pgsiq_max,
+							   &info,
+							   HASH_ELEM | HASH_BLOBS);
+#else
 	pgsiq_hash = ShmemInitHash("pg_stat_index_queries hash",
 							   pgsiq_max, pgsiq_max,
 							   &info,
 							   HASH_ELEM | HASH_BLOBS);
+#endif
 
 	LWLockRelease(AddinShmemInitLock);
 

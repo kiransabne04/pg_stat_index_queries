@@ -200,7 +200,7 @@ pg_stat_index_queries/
     tests/                        # pgTAP or plain SQL tests
   bench/                          # pgbench scripts, wide-schema benchmark, results
   docs/
-  .github/workflows/ci.yml        # PG 15–18 native; PG 16–18 SQL edition with HypoPG
+  .github/workflows/ci.yml        # PG 15–19 native; PG 16–19 SQL edition with HypoPG
 ```
 
 ### B7. Testing

@@ -3,7 +3,9 @@
 > [!WARNING]
 > **Experimental project, work in progress.** It has not been run in production, and its views, functions and behaviour may change between versions. Try it on a non-production system first and benchmark it on your own hardware.
 
-**Which queries use this index?** Postgres tells you how many times an index was scanned (`idx_scan`) and, since PG 16, when it was last used. It never tells you *which queries* depend on it. This repository answers that question, and estimates what happens to those queries if the index is dropped.
+**Which queries use this index?** Postgres tells you how many times an index was scanned (`idx_scan`) and, since PG 16, when it was last used. It never tells you *which queries* depend on it. This repository answers that question: give it an index and it lists the queries (pg_stat_statements `queryid` and text) that used it, how often, and when last. It also estimates what happens to those queries if the index is dropped.
+
+**Works on:** self-hosted PostgreSQL 15–19 (native extension). SQL edition: self-hosted PostgreSQL 16–19, Amazon RDS and Aurora (verified on Aurora PostgreSQL 17.9 and RDS for PostgreSQL 17.11, 24 Oct 2026).
 
 ```sql
 SELECT indexname, queryid, calls_executed, last_seen
@@ -11,13 +13,13 @@ SELECT indexname, queryid, calls_executed, last_seen
  WHERE indexname = 'orders_customer_id_idx';
 ```
 
-> **Status: 0.10.2 (native 0.10.1, SQL edition 0.9), experimental.** New here? Read the [user guide](docs/GUIDE.md): use cases, edge cases and limits. Tests pass on PostgreSQL 15–18 (Docker and GitHub Actions). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). 0.10 / SQL edition 0.7 adds the fixes from a production review, tested on assertion + sanitizer builds under stress ([TESTING](docs/TESTING.md#assertion--sanitizer-build-and-stress-28-oct-2026)); 0.10.1 / SQL edition 0.8 adds a correctness and security review ([findings](docs/review/REVIEW_FINDINGS.md)). Don't rely on it in production until you've benchmarked it on your hardware.
+> **Status: 0.10.3 (native 0.10.2, SQL edition 0.10), experimental; not yet tagged (latest tag: v0.10.2 = native 0.10.1, SQL edition 0.9). Version numbers are explained at the top of the [CHANGELOG](CHANGELOG.md).** New here? Read the [user guide](docs/GUIDE.md): use cases, edge cases and limits. Tests pass on PostgreSQL 15–19 (15–18 in Docker and GitHub Actions; 19 added 27 Nov 2026, Docker). Overhead is benchmarked below. The SQL edition is verified on Aurora PostgreSQL 17.9 and RDS 17.11 (24 Oct 2026). The validation lab (`sql_edition/validation/lab/`) passes on PG 16–18 in Docker, Aurora and RDS; see [docs/TESTING.md](docs/TESTING.md#index-lab-docker-24-oct-2026). 0.10 / SQL edition 0.7 adds the fixes from a production review, tested on assertion + sanitizer builds under stress ([TESTING](docs/TESTING.md#assertion--sanitizer-build-and-stress-28-oct-2026)); 0.10.1 / SQL edition 0.8 adds a correctness and security review ([findings](docs/review/REVIEW_FINDINGS.md)). Don't rely on it in production until you've benchmarked it on your hardware.
 
 ## Two extensions in this repo
 
 | | `pg_stat_index_queries` (native, C) | `pg_index_deps` (SQL edition) |
 |---|---|---|
-| Runs on | Self-hosted Postgres 15–18 | Anywhere, including **Amazon RDS and Aurora** |
+| Runs on | Self-hosted Postgres 15–19 | Anywhere, including **Amazon RDS and Aurora** |
 | How it knows | Walks every executed plan | Reads captured plan text (`aurora_stat_plans` on Aurora, `pg_stat_plans` self-hosted) |
 | Accuracy | Exact; separates "planned" from "executed" | Approximate: calls per plan that names the index |
 | Drop-impact check | — | `index_deps.index_drop_impact()` (PG 16+, HypoPG) |
@@ -178,13 +180,14 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 - [pg_qualstats](https://github.com/powa-team/pg_qualstats): predicates used, not the index the planner chose
 - [pg_stat_plans](https://github.com/pganalyze/pg_stat_plans): plans per query; the SQL edition reads it
 - [HypoPG](https://github.com/HypoPG/hypopg): hypothetical and hidden indexes; used by `index_drop_impact()`
+- [Finding unused PostgreSQL indexes](https://walstack.io/insights/postgresql-find-unused-indexes) (walstack.io, by the maintainer): a guide that uses this idea
 - [pg_ash](https://github.com/NikolayS/pg_ash), [pgsentinel](https://github.com/pgsentinel/pgsentinel): active session history (what sessions were waiting on); a different, complementary question
 
 ## Contributing, security, support
 
 - Bugs and questions: [GitHub issues](https://github.com/kiransabne04/pg_stat_index_queries/issues). Pull requests: see [CONTRIBUTING.md](CONTRIBUTING.md).
 - Vulnerabilities: report privately, see [SECURITY.md](SECURITY.md).
-- Built and maintained by Kiran Sabne. Help with PostgreSQL performance and index reviews: [databasedeveloper.dev](https://databasedeveloper.dev).
+- Built and maintained by Kiran Sabne, an independent PostgreSQL performance consultant. Help with PostgreSQL index and performance reviews: [walstack.io](https://walstack.io/postgresql-performance-investigation)
 
 ## License
 

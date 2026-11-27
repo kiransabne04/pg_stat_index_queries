@@ -1,0 +1,55 @@
+{
+   "name": "pg_stat_index_queries",
+   "abstract": "Which queries use this index? Per-index query dependents, and a drop-impact check",
+   "description": "Experimental; not yet run in production. PostgreSQL counts how often an index is scanned but never says which queries depend on it. This distribution has two extensions that answer that question. pg_stat_index_queries (C, self-hosted PostgreSQL 15+, needs shared_preload_libraries) walks every executed plan and counts (database, index, queryid) in shared memory. pg_index_deps (pure SQL/PL/pgSQL, also runs on Amazon RDS and Aurora) reads index names out of captured plan text (aurora_stat_plans or pg_stat_plans) and, with HypoPG, estimates what happens to each dependent query if an index is dropped (EXPLAIN only; it never executes a query or drops anything).",
+   "version": "0.10.3",
+   "maintainer": "Kiran Sabne",
+   "license": "postgresql",
+   "release_status": "testing",
+   "provides": {
+      "pg_stat_index_queries": {
+         "abstract": "Track which queries use each index (executor hooks, shared memory)",
+         "file": "pg_stat_index_queries--0.10.sql",
+         "docfile": "README.md",
+         "version": "0.10.2"
+      },
+      "pg_index_deps": {
+         "abstract": "Which queries depend on each index, from captured plans; drop-impact check with HypoPG",
+         "file": "sql_edition/pg_index_deps--0.10.sql",
+         "docfile": "docs/INSTALL.md",
+         "version": "0.10.0"
+      }
+   },
+   "prereqs": {
+      "runtime": {
+         "requires": {
+            "PostgreSQL": "15.0.0"
+         },
+         "recommends": {
+            "hypopg": "1.4.0"
+         }
+      }
+   },
+   "resources": {
+      "homepage": "https://github.com/kiransabne04/pg_stat_index_queries",
+      "bugtracker": {
+         "web": "https://github.com/kiransabne04/pg_stat_index_queries/issues"
+      },
+      "repository": {
+         "url": "https://github.com/kiransabne04/pg_stat_index_queries.git",
+         "web": "https://github.com/kiransabne04/pg_stat_index_queries",
+         "type": "git"
+      }
+   },
+   "tags": [
+      "index",
+      "pg_stat_statements",
+      "query-performance",
+      "aurora",
+      "rds"
+   ],
+   "meta-spec": {
+      "version": "1.0.0",
+      "url": "https://pgxn.org/meta/spec.txt"
+   }
+}

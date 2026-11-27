@@ -1,6 +1,6 @@
 # Installing
 
-## 1. Self-hosted Postgres 15–18 (native extension)
+## 1. Self-hosted Postgres 15–19 (native extension)
 
 Debian/Ubuntu (PGDG packages):
 
@@ -38,6 +38,8 @@ Do the same on each replica: each server only sees the queries it runs.
 **Upgrading 0.7 → 0.8:** install the new build, **restart** (the library changed: entries now record index columns), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.8';`. Saved counters from 0.7 are kept across the restart, marked `columns_complete = false`; `pg_stat_index_queries_reset()` starts a complete column record. The update drops and recreates `pg_stat_index_queries`, `pg_index_dependents`, `pg_index_dependents_rollup`, `pg_index_no_dependents` and `pg_index_usage` (the function's result type changes), so your own views on them must be dropped first. New view `pg_index_column_usage`.
 
 **Upgrading 0.8 → 0.9:** no restart (SQL only): `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';`. Adds the view `pg_index_sole_path`; nothing is dropped.
+
+**Upgrading 0.10.1 → 0.10.2 (release 0.10.3):** install the new build and **restart**. No `ALTER EXTENSION`: the extension version stays `0.10`. Saved counters are kept; the stats file moves to format 4, and entries loaded from the old format 3 file report `columns_complete = false` (see CHANGELOG).
 
 **Upgrading 0.10 → 0.10.1:** install the new build and **restart**. No `ALTER EXTENSION`: no SQL objects changed, and the extension version stays `0.10`. Saved counters are kept.
 

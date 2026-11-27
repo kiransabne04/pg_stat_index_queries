@@ -16,3 +16,6 @@ ci-local-logs/
 !bench/results/
 # index lab output (reports are copied into docs/ after review)
 lab-out/
+
+# PGXN distribution zips (scripts/release.sh)
+/pg_stat_index_queries-*.zip

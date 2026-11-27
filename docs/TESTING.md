@@ -17,7 +17,7 @@ Tests that read pg_stat_plans call counts must run `SELECT pg_stat_force_next_fl
 `scripts/ci-local.sh` runs the jobs of `.github/workflows/ci.yml` in Docker without GitHub or `act`. Each job gets a clean `ubuntu:24.04` container (linux/amd64 by default, like GitHub's runners), a fresh clone of the committed HEAD, and the workflow's own `run:` steps (read from the YAML by `scripts/ci_steps.py`), executed as a non-root user with sudo.
 
 ```bash
-scripts/ci-local.sh                            # all 7 jobs (native 15-18, sql-edition 16-18)
+scripts/ci-local.sh                            # all 9 jobs (native 15-19, sql-edition 16-19)
 scripts/ci-local.sh sql-edition 18             # one job
 CI_WORKTREE=1 scripts/ci-local.sh native 18    # include uncommitted changes
 CI_PLATFORM=linux/arm64 scripts/ci-local.sh    # skip amd64 emulation on Apple Silicon
@@ -69,7 +69,9 @@ Expect `t/001_persistence.pl .. ok`, `t/002_eviction.pl ..... ok` and `Result: P
 | `sql_edition/validation/managed_check.sql` (T05 smoke test) | Dry-run on PG 17 playground: self-hosted path and RDS path (`-v simulate_rds=1`). Aurora/RDS runs pending, see [AURORA-VALIDATION.md](AURORA-VALIDATION.md) |
 | `install_pg_tle.sql` | Verified with pg_tle built from source (aws/pg_tle main, Oct 2026), extension files removed from disk. 0.2 (22 Oct, pg_tle 6340fd2, PG 16): fresh install; upgrade of a 0.1 pg_tle install via the new file + `ALTER EXTENSION UPDATE` (config kept); file rerun is harmless |
 | Drop-impact fallback with no plan source (RDS-like) | Verified: candidates from query text, index use before/after correct |
-| Docker image (test runner + playground) | Built and run on macOS arm64, PG 15–18 |
+| Docker image (test runner + playground) | Built and run on macOS arm64, PG 15–18; PG 16–19 (27 Nov 2026, index lab images) |
+| PostgreSQL 19.0 (27 Nov 2026): native build (`COPT=-Werror`), 13 regression suites, 6 TAP files (91 tests) | Pass via `scripts/ci-local.sh native 19` (ubuntu:24.04, PGDG `postgresql-19` 19.0-2.pgdg24.04+1, linux/arm64). Needed one build fix: PG 19's `ShmemInitHash` takes one size argument (no `init_size`), and `heap_form_tuple` / `tuplestore_putvalues` need their headers included directly |
+| PostgreSQL 19.0 (27 Nov 2026): SQL edition, 9 suites (pg_stat_plans 2.1 + PGDG HypoPG) | Pass via `scripts/ci-local.sh sql-edition 19` (linux/arm64). No SQL change needed |
 
 ## Assertion + sanitizer build and stress (28 Oct 2026)
 
@@ -111,6 +113,13 @@ Command: `sql_edition/validation/lab/run.sh`, run against the Docker playground 
 - Scale 1: about 3.8M rows and 76 indexes. Each run takes about 12 s.
 - "rds" means `--simulate-rds` (plan_source = none).
 - Counts include the native ground-truth rows.
+
+**27 Nov 2026** (SQL edition 0.10, native 0.10.2 with the PG 19 build fix; first run on PG 19). Images built from `docker/Dockerfile` (Debian PGDG), pg_stat_plans 2.1, HypoPG 1.4.5 on PG 16 and 19, 1.4.3 on 17 and 18:
+
+| Run | PASS | FAIL | KNOWN |
+|---|---|---|---|
+| PG 16.15 / 17.11 / 18.6 / 19.0 | 194 | 0 | 5 |
+| PG 16.15 / 17.11 / 18.6 / 19.0, rds | 112 | 0 | 2 |
 
 **29 Oct 2026** (SQL edition 0.8, native 0.10.1, after the review):
 

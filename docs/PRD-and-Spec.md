@@ -81,7 +81,7 @@ RDS for PostgreSQL (non-Aurora) has no per-plan source, so only the drop-impact 
 |---|---|
 | P1 | Employment contract: outside-work and IP clauses checked before publishing. **Confirmed by the author 28 Oct 2026** |
 | P2 | Only synthetic schemas and data in tests, benchmarks and posts |
-| P3 | GitHub home decided (personal vs DatabaseDeveloper org); name checked on PGXN. **Decided 28 Oct 2026:** personal account `kiransabne04`, homepage databasedeveloper.dev |
+| P3 | GitHub home decided (personal vs DatabaseDeveloper org); name checked on PGXN. **Decided 28 Oct 2026:** personal account `kiransabne04`, homepage databasedeveloper.dev (moved to [walstack.io](https://walstack.io/postgresql-performance-investigation) on 27 Nov 2026) |
 | P4 | Benchmark hardware: a 4–8 vCPU machine for the published overhead numbers (a cloud VM for a few hours is fine) |
 | P5 | Aurora test cluster for the SQL edition (smallest instance, stopped when idle) |
 | P6 | HypoPG installed locally (and confirmed available on RDS/Aurora versions you test) |
@@ -89,7 +89,7 @@ RDS for PostgreSQL (non-Aurora) has no per-plan source, so only the drop-impact 
 ### A9. After release ("post")
 
 1. PGXN release; request PGDG packaging after 1.0.
-2. Blog: "Before you drop that unused index" (problem page on databasedeveloper.dev) + benchmark write-up.
+2. Blog: "Before you drop that unused index" (problem page on [walstack.io](https://walstack.io/insights/postgresql-find-unused-indexes)) + benchmark write-up.
 3. LinkedIn: the replica-only dependency story (lab reproduction).
 4. Post on pgsql-general / Postgres Slack announcing it; ask for feedback.
 5. Add to your audit collector: use the extension when installed, the SQL edition on Aurora.
@@ -200,7 +200,7 @@ pg_stat_index_queries/
     tests/                        # pgTAP or plain SQL tests
   bench/                          # pgbench scripts, wide-schema benchmark, results
   docs/
-  .github/workflows/ci.yml        # PG 15–18 native; PG 16–18 SQL edition with HypoPG
+  .github/workflows/ci.yml        # PG 15–19 native; PG 16–19 SQL edition with HypoPG
 ```
 
 ### B7. Testing
@@ -250,7 +250,7 @@ Machine: 4–8 vCPU, stated in results; scripts and raw output in `bench/`.
 
 1. Support PG 15–18, or 16+ only? (16+ halves the test matrix and is required for drop-impact anyway.)
 2. Is persistence needed before the first public release, or can 0.1 go out marked "experimental, counters reset on restart"?
-3. Personal GitHub or a DatabaseDeveloper org? **Decided:** personal account, homepage databasedeveloper.dev.
+3. Personal GitHub or a DatabaseDeveloper org? **Decided:** personal account, homepage databasedeveloper.dev (moved to [walstack.io](https://walstack.io/postgresql-performance-investigation) on 27 Nov 2026).
 4. Ship the SQL edition and drop-impact inside this repo, or as a separate project (simpler to install on Aurora)?
 5. Do you want pgTAP for the SQL-edition tests, or plain SQL scripts?
 6. Has the employment-contract check happened? **Yes (confirmed 28 Oct 2026).**

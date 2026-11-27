@@ -24,7 +24,7 @@ mkdir -p "$logdir"
 if [ $# -ge 1 ]; then
 	runs=("$1:${2:?usage: ci-local.sh [job pg]}")
 else
-	runs=(native:15 native:16 native:17 native:18 sql-edition:16 sql-edition:17 sql-edition:18)
+	runs=(native:15 native:16 native:17 native:18 native:19 sql-edition:16 sql-edition:17 sql-edition:18 sql-edition:19)
 fi
 
 # Runner-like base image: ubuntu:24.04 plus the tools a GitHub runner already has.

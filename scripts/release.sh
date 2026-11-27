@@ -8,8 +8,8 @@
 # Output: pg_stat_index_queries-<version>.zip in the repository root, with
 # every file under pg_stat_index_queries-<version>/ as PGXN expects. Only
 # tracked files are included (git archive), so build products, ci-local-logs/
-# and lab-out/ never get in; bench/results/ (raw benchmark output) and
-# compiled objects are excluded explicitly as well.
+# and lab-out/ never get in; those and compiled objects are excluded
+# explicitly as well. bench/results/ is kept: README and docs link to it.
 #
 # This script only builds the zip. It does not tag, push, or upload anything.
 set -euo pipefail
@@ -32,7 +32,6 @@ if [ "$rev" = HEAD ] && [ -n "$(git status --porcelain --untracked-files=no)" ];
 fi
 
 git archive --format=zip --prefix="$name/" -o "$out" "$rev" -- . \
-	':(exclude)bench/results' \
 	':(exclude)ci-local-logs' \
 	':(exclude)lab-out' \
 	':(exclude,glob)**/*.o' \

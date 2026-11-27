@@ -20,7 +20,7 @@ include $(PGXS)
 # ---------------------------------------------------------------------------
 # Convenience targets
 # ---------------------------------------------------------------------------
-.PHONY: test-all sql-edition sql-edition-check bench docker-test
+.PHONY: test-all sql-edition sql-edition-check bench docker-test dist
 
 test-all: installcheck sql-edition-check
 
@@ -35,3 +35,7 @@ bench:
 
 docker-test:
 	docker compose -f docker/docker-compose.yml run --rm test
+
+# PGXN zip of HEAD (version from META.json); see scripts/release.sh
+dist:
+	./scripts/release.sh

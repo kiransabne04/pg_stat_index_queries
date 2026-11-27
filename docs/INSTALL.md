@@ -39,6 +39,8 @@ Do the same on each replica: each server only sees the queries it runs.
 
 **Upgrading 0.8 → 0.9:** no restart (SQL only): `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.9';`. Adds the view `pg_index_sole_path`; nothing is dropped.
 
+**Upgrading 0.10.1 → 0.10.2 (release 0.10.3):** install the new build and **restart**. No `ALTER EXTENSION`: the extension version stays `0.10`. Saved counters are kept; the stats file moves to format 4, and entries loaded from the old format 3 file report `columns_complete = false` (see CHANGELOG).
+
 **Upgrading 0.10 → 0.10.1:** install the new build and **restart**. No `ALTER EXTENSION`: no SQL objects changed, and the extension version stays `0.10`. Saved counters are kept.
 
 **Upgrading 0.9 → 0.10:** install the new build, **restart** (the library changed), then `ALTER EXTENSION pg_stat_index_queries UPDATE TO '0.10';` (replaces `pg_index_role`; nothing is dropped). Saved counters are kept.

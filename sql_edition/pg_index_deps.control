@@ -1,4 +1,5 @@
 # pg_index_deps: SQL edition of pg_stat_index_queries (no C code)
+# Version 0.10 (release 0.10.3; 0.10.0 in META.json). See CHANGELOG.md.
 comment = 'which queries depend on each index, from captured plans; drop-impact check with HypoPG'
 default_version = '0.10'
 schema = index_deps

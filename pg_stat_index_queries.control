@@ -1,4 +1,7 @@
 # pg_stat_index_queries extension
+# Library 0.10.2 (release 0.10.3). default_version is the version of the SQL
+# objects; it stays '0.10' because 0.10.1 and 0.10.2 changed only the C
+# library (rebuild + restart, no ALTER EXTENSION). See CHANGELOG.md.
 comment = 'track which queries use each index'
 default_version = '0.10'
 module_pathname = '$libdir/pg_stat_index_queries'

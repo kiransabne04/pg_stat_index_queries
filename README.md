@@ -3,7 +3,9 @@
 > [!WARNING]
 > **Experimental project, work in progress.** It has not been run in production, and its views, functions and behaviour may change between versions. Try it on a non-production system first and benchmark it on your own hardware.
 
-**Which queries use this index?** Postgres tells you how many times an index was scanned (`idx_scan`) and, since PG 16, when it was last used. It never tells you *which queries* depend on it. This repository answers that question, and estimates what happens to those queries if the index is dropped.
+**Which queries use this index?** Postgres tells you how many times an index was scanned (`idx_scan`) and, since PG 16, when it was last used. It never tells you *which queries* depend on it. This repository answers that question: give it an index and it lists the queries (pg_stat_statements `queryid` and text) that used it, how often, and when last. It also estimates what happens to those queries if the index is dropped.
+
+**Works on:** self-hosted PostgreSQL 15–19 (native extension). SQL edition: self-hosted PostgreSQL 16–19, Amazon RDS and Aurora (verified on Aurora PostgreSQL 17.9 and RDS for PostgreSQL 17.11, 24 Oct 2026).
 
 ```sql
 SELECT indexname, queryid, calls_executed, last_seen
@@ -178,6 +180,7 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 - [pg_qualstats](https://github.com/powa-team/pg_qualstats): predicates used, not the index the planner chose
 - [pg_stat_plans](https://github.com/pganalyze/pg_stat_plans): plans per query; the SQL edition reads it
 - [HypoPG](https://github.com/HypoPG/hypopg): hypothetical and hidden indexes; used by `index_drop_impact()`
+- [Finding unused PostgreSQL indexes](https://walstack.io/insights/postgresql-find-unused-indexes) (walstack.io, by the maintainer): a guide that uses this idea
 - [pg_ash](https://github.com/NikolayS/pg_ash), [pgsentinel](https://github.com/pgsentinel/pgsentinel): active session history (what sessions were waiting on); a different, complementary question
 
 ## Contributing, security, support

@@ -184,7 +184,7 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 
 - Bugs and questions: [GitHub issues](https://github.com/kiransabne04/pg_stat_index_queries/issues). Pull requests: see [CONTRIBUTING.md](CONTRIBUTING.md).
 - Vulnerabilities: report privately, see [SECURITY.md](SECURITY.md).
-- Built and maintained by Kiran Sabne. Help with PostgreSQL performance and index reviews: [databasedeveloper.dev](https://databasedeveloper.dev).
+- Built and maintained by Kiran Sabne, an independent PostgreSQL performance consultant. Help with PostgreSQL index and performance reviews: [walstack.io](https://walstack.io/postgresql-performance-investigation)
 
 ## License
 

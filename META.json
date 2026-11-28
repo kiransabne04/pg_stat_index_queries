@@ -3,7 +3,7 @@
    "abstract": "Which queries use this index? Per-index query dependents, and a drop-impact check",
    "description": "Experimental; not yet run in production. PostgreSQL counts how often an index is scanned but never says which queries depend on it. This distribution has two extensions that answer that question. pg_stat_index_queries (C, self-hosted PostgreSQL 15+, needs shared_preload_libraries) walks every executed plan and counts (database, index, queryid) in shared memory. pg_index_deps (pure SQL/PL/pgSQL, also runs on Amazon RDS and Aurora) reads index names out of captured plan text (aurora_stat_plans or pg_stat_plans) and, with HypoPG, estimates what happens to each dependent query if an index is dropped (EXPLAIN only; it never executes a query or drops anything).",
    "version": "0.10.3",
-   "maintainer": "Kiran Sabne",
+   "maintainer": "Kiran Sabne <hello@walstack.io>",
    "license": "postgresql",
    "release_status": "testing",
    "provides": {

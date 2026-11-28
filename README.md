@@ -187,7 +187,7 @@ Run as a non-root user. See [docs/TESTING.md](docs/TESTING.md).
 
 - Bugs and questions: [GitHub issues](https://github.com/kiransabne04/pg_stat_index_queries/issues). Pull requests: see [CONTRIBUTING.md](CONTRIBUTING.md).
 - Vulnerabilities: report privately, see [SECURITY.md](SECURITY.md).
-- Built and maintained by Kiran Sabne, an independent PostgreSQL performance consultant. Help with PostgreSQL index and performance reviews: [walstack.io](https://walstack.io/postgresql-performance-investigation)
+- Built and maintained by Kiran Sabne, an independent PostgreSQL performance consultant at [walstack.io](https://walstack.io). Need help with slow queries or index cleanup? See [PostgreSQL and AWS RDS/Aurora performance and index reviews](https://walstack.io/postgresql-performance-investigation), or start with the [free read-only PostgreSQL snapshot](https://walstack.io/snapshot).
 
 ## License
 

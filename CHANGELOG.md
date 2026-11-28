@@ -14,6 +14,7 @@
 - **PGXN metadata** (no upload yet): `META.json` (meta-spec 1.0.0, `release_status` testing, validated with PGXN::Meta::Validator 0.16.0) and `make dist` / `scripts/release.sh`, which builds `pg_stat_index_queries-<version>.zip` from a committed revision with `git archive` (tracked files only; compiled objects excluded; `bench/results/` kept because README links to it). Building the zip does not tag, push or upload.
 - Docs: README says in its first paragraph what the tool returns for an index, adds a "Works on" line (tested versions only) and links the maintainer's unused-index guide under Related work.
 - Docs: maintainer support link moved from databasedeveloper.dev to walstack.io (the site moved; README, PRD, DECISIONS). No code change.
+- Docs: README support line links walstack.io, the PostgreSQL and AWS RDS/Aurora performance and index reviews page and the free read-only snapshot (walstack.io/snapshot); `META.json` maintainer gets the contact address hello@walstack.io. No code change.
 - **Docs:** ARCHITECTURE, GUIDE and README still described two limits that 0.10.1 removed: the 64-index cap per statement (gone; every index is recorded, unless the statement is skipped under out-of-memory since 0.10.2) and bitmap index scans always counting as executed (now only on PG 15/16, and for parallel-aware scans on 17+). GUIDE "What has been verified" updated with the 29 Oct Aurora 17.11 and RDS 17.11 runs and the pg_tle upgrade check.
 
 ## 0.10.2 (2026-10-29): SQL edition pg_index_deps 0.9 (native unchanged, 0.10.1)
